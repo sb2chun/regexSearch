@@ -1,0 +1,136 @@
+import os
+import re
+import tkinter as tk
+from tkinter import ttk, filedialog, messagebox
+import pandas as pd
+from datetime import datetime
+
+# ---------------------------
+# 정규식 분할 컴파일 함수
+# ---------------------------
+def compile_large_regex(pattern_text, chunk_size=500):
+    # '|'로 구분된 키워드가 너무 많을 때 분할
+    parts = pattern_text.split('|')
+    regexes = []
+    for i in range(0, len(parts), chunk_size):
+        chunk = '|'.join(parts[i:i + chunk_size])
+        try:
+            regexes.append(re.compile(chunk))
+        except re.error as e:
+            print(f"⚠ 정규식 오류 (chunk {i//chunk_size}): {e}")
+    return regexes
+
+
+# ---------------------------
+# 파일 내 텍스트 검색 함수
+# ---------------------------
+def search_files():
+    search_path = path_entry.get()
+    pattern_text = regex_entry.get().strip()
+    extension = ext_entry.get().strip()
+
+    if not search_path or not pattern_text:
+        messagebox.showwarning("경고", "경로와 정규표현식을 입력하세요.")
+        return
+
+    result_list.delete(*result_list.get_children())
+    results.clear()
+
+    # 정규식 분할 컴파일
+    regexes = compile_large_regex(pattern_text)
+    print(f"✅ 정규식 {len(regexes)}개로 분할 컴파일 완료")
+
+    matched_files = []
+    for root, _, files in os.walk(search_path):
+        for file in files:
+            if not extension or file.endswith(extension):
+                matched_files.append(os.path.join(root, file))
+
+    print(f"🔍 총 {len(matched_files)}개 파일 검색 중...")
+
+    for full_path in matched_files:
+        try:
+            with open(full_path, encoding='utf-8', errors='ignore') as f:
+                for i, line in enumerate(f, 1):
+                    for regex in regexes:
+                        match = regex.search(line)
+                        if match:
+                            # 어떤 키워드가 매칭되었는지 추출
+                            keyword = match.group(0)
+                            result = (
+                                os.path.basename(full_path),
+                                i,
+                                keyword,
+                                line.strip(),
+                                full_path
+                            )
+                            results.append(result)
+                            result_list.insert('', 'end', values=result)
+                            break  # 한 줄에서 하나만 매칭되면 다음 줄로
+        except Exception as e:
+            print(f"⚠ 파일 읽기 오류: {full_path}: {e}")
+
+    messagebox.showinfo("완료", f"검색 완료 ({len(results)}건)")
+
+
+# ---------------------------
+# 엑셀 저장 함수
+# ---------------------------
+def save_to_excel():
+    if not results:
+        messagebox.showwarning("경고", "저장할 검색 결과가 없습니다.")
+        return
+
+    df = pd.DataFrame(results, columns=['파일명', '라인', '키워드', '내용', '전체경로'])
+    file_path = filedialog.asksaveasfilename(
+        defaultextension=".xlsx",
+        filetypes=[("Excel 파일", "*.xlsx")]
+    )
+    if file_path:
+        df.to_excel(file_path, index=False)
+        messagebox.showinfo("완료", f"엑셀 저장 완료: {file_path}")
+
+
+# ---------------------------
+# GUI 구성
+# ---------------------------
+root = tk.Tk()
+root.title("정규표현식 대용량 검색기")
+root.geometry("1100x600")
+
+frame = ttk.Frame(root, padding=10)
+frame.pack(fill='x')
+
+# 경로 선택
+ttk.Label(frame, text="검색 경로:").grid(row=0, column=0, sticky='w')
+path_entry = ttk.Entry(frame, width=80)
+path_entry.grid(row=0, column=1, padx=5)
+ttk.Button(frame, text="찾기", command=lambda: path_entry.insert(0, filedialog.askdirectory())).grid(row=0, column=2)
+
+# 확장자
+ttk.Label(frame, text="확장자(.java 등):").grid(row=1, column=0, sticky='w')
+ext_entry = ttk.Entry(frame, width=15)
+ext_entry.grid(row=1, column=1, sticky='w', padx=5)
+
+# 정규표현식 입력
+ttk.Label(frame, text="정규표현식:").grid(row=2, column=0, sticky='nw')
+regex_entry = tk.Text(frame, width=80, height=5)
+regex_entry.grid(row=2, column=1, padx=5, pady=5)
+
+# 버튼
+btn_frame = ttk.Frame(frame)
+btn_frame.grid(row=3, column=1, pady=5, sticky='e')
+ttk.Button(btn_frame, text="검색", command=search_files).grid(row=0, column=0, padx=5)
+ttk.Button(btn_frame, text="엑셀 저장", command=save_to_excel).grid(row=0, column=1, padx=5)
+
+# 결과 표시
+cols = ('파일명', '라인', '키워드', '내용', '전체경로')
+result_list = ttk.Treeview(root, columns=cols, show='headings', height=20)
+for col in cols:
+    result_list.heading(col, text=col)
+    result_list.column(col, width=150 if col != '내용' else 400)
+result_list.pack(fill='both', expand=True)
+
+results = []
+
+root.mainloop()
