@@ -5,7 +5,8 @@ import threading
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import tkinter as tk
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog, messagebox, ttk, simpledialog
+from queue import Queue
 
 # =======================================
 # 🔹 글로벌 변수
@@ -14,7 +15,7 @@ search_results = []
 stop_flag = False
 
 # =======================================
-# 🔹 검색 함수
+# 🔹 검색 함수 (대규모 최적화)
 # =======================================
 def search_files(root_path, regex_str, ignore_case, tree, progress_var, btn_search, btn_stop):
     global search_results, stop_flag
@@ -52,6 +53,7 @@ def search_files(root_path, regex_str, ignore_case, tree, progress_var, btn_sear
 
     total_files = len(all_files)
     processed_files = 0
+    result_queue = Queue()
 
     def search_file(file_path):
         nonlocal processed_files
@@ -68,12 +70,14 @@ def search_files(root_path, regex_str, ignore_case, tree, progress_var, btn_sear
             print(f"[ERROR] {file_path}: {e}")
         finally:
             processed_files += 1
-            progress_var.set(int(processed_files / total_files * 100))
+            if processed_files % 10 == 0 or processed_files == total_files:
+                progress_var.set(int(processed_files / total_files * 100))
         return results
 
     btn_search.config(state="disabled")
     btn_stop.config(state="normal")
 
+    # 멀티코어 실행
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
         futures = {executor.submit(search_file, f): f for f in all_files}
         for future in as_completed(futures):
@@ -82,10 +86,15 @@ def search_files(root_path, regex_str, ignore_case, tree, progress_var, btn_sear
             try:
                 results = future.result()
                 for r in results:
-                    tree.insert("", tk.END, values=r)
-                    search_results.append(r)
+                    result_queue.put(r)
             except Exception as e:
                 print(f"[ERROR] {futures[future]}: {e}")
+
+    # UI 업데이트
+    while not result_queue.empty():
+        r = result_queue.get()
+        tree.insert("", tk.END, values=r)
+        search_results.append(r)
 
     btn_search.config(state="normal")
     btn_stop.config(state="disabled")
@@ -96,25 +105,30 @@ def search_files(root_path, regex_str, ignore_case, tree, progress_var, btn_sear
     progress_var.set(0)
 
 # =======================================
-# 🔹 중지 버튼 함수
+# 🔹 중지 버튼
 # =======================================
 def stop_search():
     global stop_flag
     stop_flag = True
 
 # =======================================
-# 🔹 엑셀 저장 함수
+# 🔹 엑셀 저장 (폴더+파일명)
 # =======================================
 def save_to_excel():
     if not search_results:
         messagebox.showwarning("경고", "저장할 데이터가 없습니다.")
         return
+
     folder = filedialog.askdirectory(title="엑셀 저장할 폴더 선택")
     if not folder:
         return
 
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    output_path = os.path.join(folder, f"search_result_{timestamp}.xlsx")
+    file_name = simpledialog.askstring("파일명 입력", "저장할 엑셀 파일명을 입력하세요 (확장자 제외):")
+    if not file_name:
+        messagebox.showinfo("취소", "엑셀 저장이 취소되었습니다.")
+        return
+
+    output_path = os.path.join(folder, f"{file_name}.xlsx")
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.title = "SearchResult"
@@ -155,8 +169,8 @@ def start_search():
 # 🔹 Tkinter UI
 # =======================================
 root = tk.Tk()
-root.title("정규표현식 검색기 (멀티코어 + 미리보기 + 중지)")
-root.geometry("1000x650")
+root.title("대규모 정규표현식 검색기 (멀티코어 + 최적화 + 미리보기)")
+root.geometry("1000x700")
 root.resizable(True, True)
 
 # ---- 탐색 경로 ----
@@ -165,13 +179,18 @@ frame_path = tk.Frame(root)
 frame_path.pack(fill="x", padx=10)
 entry_path = tk.Entry(frame_path)
 entry_path.pack(side="left", fill="x", expand=True, padx=(0, 5))
-tk.Button(frame_path, text="폴더 선택", command=browse_directory).pack(side="right")
+tk.Button(frame_path, text="폴더 선택", command=browse_directory).pack(side="left")
 
-# ---- 정규표현식 입력 ----
-tk.Label(root, text="🧩 정규표현식 입력:", anchor="w").pack(fill="x", padx=10, pady=(10, 0))
-entry_regex = tk.Entry(root)
-entry_regex.pack(fill="x", padx=10, pady=(0, 5))
-entry_regex.insert(0, r"(['\"])(operator|system|config)\1")
+# ---- 정규표현식 입력 + Clear 버튼 ----
+frame_regex = tk.Frame(root)
+frame_regex.pack(fill="x", padx=10, pady=(10, 0))
+
+entry_regex = tk.Entry(frame_regex)
+entry_regex.pack(side="left", fill="x", expand=True, padx=(0,5))
+entry_regex.insert(0, r"(['\"])(operator|system|config)\1")  # 기본 예시
+
+btn_clear_regex = tk.Button(frame_regex, text="✖ Clear", command=lambda: entry_regex.delete(0, tk.END))
+btn_clear_regex.pack(side="left")
 
 # ---- 옵션 ----
 var_ignore = tk.BooleanVar(value=False)
@@ -190,7 +209,7 @@ btn_search.pack(side="left", fill="x", expand=True, padx=(0,5))
 btn_stop = tk.Button(frame_buttons, text="⏹ 중지", command=stop_search, bg="#DC3545", fg="white", state="disabled")
 btn_stop.pack(side="left", fill="x", expand=True, padx=(0,5))
 btn_save = tk.Button(frame_buttons, text="💾 엑셀 저장", command=save_to_excel, bg="#28A745", fg="white")
-btn_save.pack(side="left", fill="x", expand=True, padx=(0,0))
+btn_save.pack(side="left", fill="x", expand=True)
 
 # ---- 결과 테이블 ----
 columns = ("파일명", "검색키워드", "라인", "내용", "전체경로")
