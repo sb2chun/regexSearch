@@ -2,48 +2,102 @@ import os
 import re
 import openpyxl
 from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
-# 🔹 검색 설정
-SEARCH_DIR = r"D:\source"  # 탐색할 루트 폴더 경로
-WORD_FILE = r"D:\keywords.txt"  # 검색 단어 목록 파일 (한 줄에 하나)
-OUTPUT_FILE = r"D:\search_result.xlsx"  # 결과 저장 파일명
+# ==========================
+# 🔧 사용자 입력
+# ==========================
+SEARCH_DIR = input("📂 탐색할 폴더 경로를 입력하세요: ").strip()
+if not os.path.exists(SEARCH_DIR):
+    print("❌ 경로를 찾을 수 없습니다.")
+    exit()
+
+regex_str = input("🔍 검색할 정규표현식을 입력하세요: ").strip()
+if not regex_str:
+    print("❌ 정규표현식이 비어있습니다.")
+    exit()
+
+ignore_case_input = input("대소문자 구분 없이 검색할까요? (Y/N): ").strip().lower()
+IGNORE_CASE = ignore_case_input == 'y'
+
+# 확장자 및 스레드 설정
 EXTENSIONS = ('.java', '.cs', '.xml')
+MAX_WORKERS = os.cpu_count() or 8  # 자동으로 CPU 코어 수에 맞게
 
-# 🔹 검색 단어 로드
-with open(WORD_FILE, 'r', encoding='utf-8') as f:
-    words = [w.strip() for w in f.readlines() if w.strip()]
+# ==========================
+# 🔧 정규식 컴파일
+# ==========================
+try:
+    flags = re.IGNORECASE if IGNORE_CASE else 0
+    pattern = re.compile(regex_str, flags)
+    print(f"✅ 정규식 컴파일 완료: {regex_str}")
+except re.error as e:
+    print(f"❌ 정규식 오류: {e}")
+    exit()
 
-# 🔹 정규표현식 컴파일 (속도 핵심)
-# (['"])(단어1|단어2|단어3)\1 형태로 생성
-pattern = re.compile(rf"(['\"])\b({'|'.join(map(re.escape, words))})\b\1")
-
-# 🔹 엑셀 준비
+# ==========================
+# 🔧 엑셀 초기화
+# ==========================
 wb = openpyxl.Workbook()
 ws = wb.active
 ws.title = "SearchResult"
 ws.append(["파일 경로", "라인 번호", "매칭 문자열"])
 
-# 🔹 탐색 및 검색
-file_count = 0
-match_count = 0
+# ==========================
+# 🔧 파일 하나 검색 함수
+# ==========================
+def search_file(file_path):
+    results = []
+    try:
+        with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+            for i, line in enumerate(f, 1):
+                for m in pattern.finditer(line):
+                    results.append((file_path, i, m.group()))
+    except Exception as e:
+        print(f"[ERROR] {file_path}: {e}")
+    return results
 
-for root, dirs, files in os.walk(SEARCH_DIR):
+# ==========================
+# 🔧 대상 파일 수집
+# ==========================
+all_files = []
+for root, _, files in os.walk(SEARCH_DIR):
     for file in files:
         if file.lower().endswith(EXTENSIONS):
-            file_count += 1
-            file_path = os.path.join(root, file)
+            all_files.append(os.path.join(root, file))
 
-            try:
-                with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
-                    for i, line in enumerate(f, 1):
-                        # 매칭 결과 모두 찾기
-                        for m in pattern.finditer(line):
-                            ws.append([file_path, i, m.group()])
-                            match_count += 1
-            except Exception as e:
-                print(f"[ERROR] {file_path} - {e}")
+print(f"\n🔍 총 대상 파일 수: {len(all_files)}개")
+if not all_files:
+    print("❌ 탐색할 파일이 없습니다.")
+    exit()
 
-# 🔹 저장
+# ==========================
+# 🔧 병렬 검색 시작
+# ==========================
+match_count = 0
+file_count = len(all_files)
+
+with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+    futures = {executor.submit(search_file, fp): fp for fp in all_files}
+    for i, future in enumerate(as_completed(futures), 1):
+        file_path = futures[future]
+        try:
+            results = future.result()
+            for r in results:
+                ws.append(r)
+            match_count += len(results)
+        except Exception as e:
+            print(f"[ERROR] {file_path}: {e}")
+
+        if i % 100 == 0:
+            print(f"  ▶ 진행률: {i}/{file_count} 파일 처리 완료...")
+
+# ==========================
+# 🔧 결과 저장
+# ==========================
+timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+OUTPUT_FILE = os.path.join(SEARCH_DIR, f"search_result_{timestamp}.xlsx")
+
 ws.append([])
 ws.append(["검색 완료 시각", datetime.now().strftime("%Y-%m-%d %H:%M:%S")])
 ws.append(["총 파일 수", file_count])
@@ -51,6 +105,7 @@ ws.append(["총 매칭 수", match_count])
 
 wb.save(OUTPUT_FILE)
 
-print(f"✅ 검색 완료! 결과: {OUTPUT_FILE}")
-print(f"  - 총 파일 수: {file_count}")
-print(f"  - 매칭 수: {match_count}")
+print("\n✅ 검색 완료!")
+print(f"📁 결과 파일: {OUTPUT_FILE}")
+print(f"📄 총 파일 수: {file_count}")
+print(f"🔍 매칭 수: {match_count}")
