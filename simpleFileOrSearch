@@ -5,12 +5,22 @@ import threading
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import tkinter as tk
-from tkinter import filedialog, messagebox
+from tkinter import filedialog, messagebox, ttk
 
 # =======================================
-# 🔹 검색 함수 (멀티코어)
+# 🔹 글로벌 변수
 # =======================================
-def search_files(root_path, regex_str, ignore_case):
+search_results = []
+stop_flag = False
+
+# =======================================
+# 🔹 검색 함수
+# =======================================
+def search_files(root_path, regex_str, ignore_case, tree, progress_var, btn_search, btn_stop):
+    global search_results, stop_flag
+    stop_flag = False
+    search_results = []
+
     EXTENSIONS = ('.java', '.cs', '.xml')
     MAX_WORKERS = os.cpu_count() or 8
 
@@ -19,14 +29,15 @@ def search_files(root_path, regex_str, ignore_case):
         pattern = re.compile(regex_str, flags)
     except re.error as e:
         messagebox.showerror("정규식 오류", f"유효하지 않은 정규표현식입니다.\n\n{str(e)}")
+        btn_search.config(state="normal")
+        btn_stop.config(state="disabled")
         return
 
-    wb = openpyxl.Workbook()
-    ws = wb.active
-    ws.title = "SearchResult"
-    ws.append(["파일명", "검색키워드", "라인", "내용", "전체경로"])
+    # Tree 초기화
+    for row in tree.get_children():
+        tree.delete(row)
 
-    # 모든 파일 수집
+    # 파일 수집
     all_files = []
     for root, _, files in os.walk(root_path):
         for file in files:
@@ -35,49 +46,83 @@ def search_files(root_path, regex_str, ignore_case):
 
     if not all_files:
         messagebox.showinfo("결과 없음", "탐색할 대상 파일이 없습니다.")
+        btn_search.config(state="normal")
+        btn_stop.config(state="disabled")
         return
 
-    # 파일별 검색
+    total_files = len(all_files)
+    processed_files = 0
+
     def search_file(file_path):
+        nonlocal processed_files
         results = []
+        if stop_flag:
+            return results
         file_name = os.path.basename(file_path)
         try:
             with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
                 for i, line in enumerate(f, 1):
                     for m in pattern.finditer(line):
-                        matched = m.group()
-                        results.append((file_name, matched, i, line.strip(), file_path))
+                        results.append((file_name, m.group(), i, line.strip(), file_path))
         except Exception as e:
             print(f"[ERROR] {file_path}: {e}")
+        finally:
+            processed_files += 1
+            progress_var.set(int(processed_files / total_files * 100))
         return results
 
-    match_count = 0
+    btn_search.config(state="disabled")
+    btn_stop.config(state="normal")
 
-    # 멀티코어 검색 실행
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
         futures = {executor.submit(search_file, f): f for f in all_files}
         for future in as_completed(futures):
+            if stop_flag:
+                break
             try:
                 results = future.result()
                 for r in results:
-                    ws.append(r)
-                match_count += len(results)
+                    tree.insert("", tk.END, values=r)
+                    search_results.append(r)
             except Exception as e:
                 print(f"[ERROR] {futures[future]}: {e}")
 
-    # 결과 파일 저장
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    output_path = os.path.join(root_path, f"search_result_{timestamp}.xlsx")
-    ws.append([])
-    ws.append(["총 파일 수", len(all_files)])
-    ws.append(["매칭된 항목 수", match_count])
-    ws.append(["완료 시간", datetime.now().strftime("%Y-%m-%d %H:%M:%S")])
-    wb.save(output_path)
+    btn_search.config(state="normal")
+    btn_stop.config(state="disabled")
+    if stop_flag:
+        messagebox.showinfo("검색 중단", f"검색이 중단되었습니다.\n매칭된 항목 수: {len(search_results)}")
+    else:
+        messagebox.showinfo("검색 완료", f"검색 완료!\n총 매칭 수: {len(search_results)}")
+    progress_var.set(0)
 
-    messagebox.showinfo(
-        "검색 완료",
-        f"총 파일 수: {len(all_files)}\n매칭 수: {match_count}\n\n결과 파일:\n{output_path}"
-    )
+# =======================================
+# 🔹 중지 버튼 함수
+# =======================================
+def stop_search():
+    global stop_flag
+    stop_flag = True
+
+# =======================================
+# 🔹 엑셀 저장 함수
+# =======================================
+def save_to_excel():
+    if not search_results:
+        messagebox.showwarning("경고", "저장할 데이터가 없습니다.")
+        return
+    folder = filedialog.askdirectory(title="엑셀 저장할 폴더 선택")
+    if not folder:
+        return
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    output_path = os.path.join(folder, f"search_result_{timestamp}.xlsx")
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "SearchResult"
+    ws.append(["파일명", "검색키워드", "라인", "내용", "전체경로"])
+    for r in search_results:
+        ws.append(r)
+    wb.save(output_path)
+    messagebox.showinfo("저장 완료", f"엑셀 파일이 저장되었습니다:\n{output_path}")
 
 # =======================================
 # 🔹 UI 이벤트
@@ -101,36 +146,64 @@ def start_search():
         return
 
     threading.Thread(
-        target=search_files, args=(root_path, regex_str, ignore_case), daemon=True
+        target=search_files,
+        args=(root_path, regex_str, ignore_case, tree, progress_var, btn_search, btn_stop),
+        daemon=True
     ).start()
 
 # =======================================
-# 🔹 Tkinter GUI
+# 🔹 Tkinter UI
 # =======================================
 root = tk.Tk()
-root.title("정규표현식 기반 하드코딩 검색기 (멀티코어)")
-root.geometry("620x300")
-root.resizable(False, False)
+root.title("정규표현식 검색기 (멀티코어 + 미리보기 + 중지)")
+root.geometry("1000x650")
+root.resizable(True, True)
 
-tk.Label(root, text="📂 탐색 경로:", anchor="w").pack(fill="x", padx=10, pady=(15, 0))
+# ---- 탐색 경로 ----
+tk.Label(root, text="📂 탐색 경로:", anchor="w").pack(fill="x", padx=10, pady=(10, 0))
 frame_path = tk.Frame(root)
 frame_path.pack(fill="x", padx=10)
 entry_path = tk.Entry(frame_path)
 entry_path.pack(side="left", fill="x", expand=True, padx=(0, 5))
 tk.Button(frame_path, text="폴더 선택", command=browse_directory).pack(side="right")
 
-tk.Label(root, text="🧩 정규표현식 입력:", anchor="w").pack(fill="x", padx=10, pady=(15, 0))
+# ---- 정규표현식 입력 ----
+tk.Label(root, text="🧩 정규표현식 입력:", anchor="w").pack(fill="x", padx=10, pady=(10, 0))
 entry_regex = tk.Entry(root)
 entry_regex.pack(fill="x", padx=10, pady=(0, 5))
-entry_regex.insert(0, r"(['\"])(operator|system|config)\1")  # 예시
+entry_regex.insert(0, r"(['\"])(operator|system|config)\1")
 
+# ---- 옵션 ----
 var_ignore = tk.BooleanVar(value=False)
 tk.Checkbutton(root, text="대소문자 구분 없이 검색", variable=var_ignore).pack(anchor="w", padx=15, pady=5)
 
-tk.Button(
-    root, text="🔍 검색 시작", command=start_search, bg="#0078D7", fg="white", height=2
-).pack(fill="x", padx=10, pady=(10, 0))
+# ---- 진행률 바 ----
+progress_var = tk.IntVar()
+progress_bar = ttk.Progressbar(root, variable=progress_var, maximum=100)
+progress_bar.pack(fill="x", padx=10, pady=(5,5))
 
-tk.Label(root, text="※ 검색 확장자: .java, .cs, .xml", fg="gray").pack(pady=5)
+# ---- 실행/중지/저장 버튼 ----
+frame_buttons = tk.Frame(root)
+frame_buttons.pack(fill="x", padx=10, pady=(0, 10))
+btn_search = tk.Button(frame_buttons, text="🔍 검색 시작", command=start_search, bg="#0078D7", fg="white")
+btn_search.pack(side="left", fill="x", expand=True, padx=(0,5))
+btn_stop = tk.Button(frame_buttons, text="⏹ 중지", command=stop_search, bg="#DC3545", fg="white", state="disabled")
+btn_stop.pack(side="left", fill="x", expand=True, padx=(0,5))
+btn_save = tk.Button(frame_buttons, text="💾 엑셀 저장", command=save_to_excel, bg="#28A745", fg="white")
+btn_save.pack(side="left", fill="x", expand=True, padx=(0,0))
+
+# ---- 결과 테이블 ----
+columns = ("파일명", "검색키워드", "라인", "내용", "전체경로")
+tree = ttk.Treeview(root, columns=columns, show="headings", height=20)
+for col in columns:
+    tree.heading(col, text=col)
+    tree.column(col, width=150 if col != "내용" else 400, anchor="w")
+
+scrollbar_y = ttk.Scrollbar(root, orient="vertical", command=tree.yview)
+tree.configure(yscroll=scrollbar_y.set)
+scrollbar_y.pack(side="right", fill="y")
+tree.pack(fill="both", expand=True, padx=10, pady=(0,10))
+
+tk.Label(root, text="※ 검색 확장자: .java, .cs, .xml", fg="gray").pack(pady=(0,5))
 
 root.mainloop()
