@@ -14,15 +14,11 @@ DEFAULT_JAVA_PATTERN = r'selectFabOrientedUseYn\s*\(\s*([^,]+)\s*,\s*([^,]+)\s*,
 #       핵심 파싱 로직          #
 # ============================== #
 def extract_params(file_path, cs_pattern, java_pattern):
-    """
-    반환: [(file_path, file_name, type, categoryCode, diffCode), ...]
-    factory는 반환 목록에서 제외
-    """
     results = []
     file_name = os.path.basename(file_path)
 
     if file_name.endswith(".designer.cs"):
-        return results  # 제외
+        return results
 
     try:
         with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
@@ -33,7 +29,6 @@ def extract_params(file_path, cs_pattern, java_pattern):
     if file_name.endswith(".cs"):
         matches = re.findall(cs_pattern, data, flags=re.IGNORECASE)
         for fac, cat, diff in matches:
-            # cs: GetFabOrientedUseYn(factory, categoryCode, diffCode)
             results.append((
                 file_path,
                 file_name,
@@ -45,7 +40,6 @@ def extract_params(file_path, cs_pattern, java_pattern):
     elif file_name.endswith(".java"):
         matches = re.findall(java_pattern, data, flags=re.IGNORECASE)
         for cat, diff, fac in matches:
-            # java: selectFabOrientedUseYn(categoryCode, diffCode, factory)
             results.append((
                 file_path,
                 file_name,
@@ -57,23 +51,22 @@ def extract_params(file_path, cs_pattern, java_pattern):
     return results
 
 
-def search_files(path, cs_pattern, java_pattern):
+def search_files(paths, cs_pattern, java_pattern):
     collected = []
-
-    if os.path.isfile(path):
-        return extract_params(path, cs_pattern, java_pattern)
-
-    for root, dirs, files in os.walk(path):
-        for file in files:
-            if file.endswith(".cs") and not file.endswith(".designer.cs"):
-                full = os.path.join(root, file)
-                collected += extract_params(full, cs_pattern, java_pattern)
-            elif file.endswith(".java"):
-                full = os.path.join(root, file)
-                collected += extract_params(full, cs_pattern, java_pattern)
-
+    for path in paths:
+        path = path.strip()
+        if not path:
+            continue
+        if os.path.isfile(path):
+            collected += extract_params(path, cs_pattern, java_pattern)
+        elif os.path.isdir(path):
+            for root, dirs, files in os.walk(path):
+                for file in files:
+                    if file.endswith(".cs") and not file.endswith(".designer.cs"):
+                        collected += extract_params(os.path.join(root, file), cs_pattern, java_pattern)
+                    elif file.endswith(".java"):
+                        collected += extract_params(os.path.join(root, file), cs_pattern, java_pattern)
     return collected
-
 
 # ============================== #
 #       GUI 구성 부분            #
@@ -85,29 +78,30 @@ class App:
         master.geometry("1400x800")
         master.minsize(900, 600)
 
-        # 입력 경로
-        self.path_entry = tk.Entry(master, width=100)
-        self.path_entry.grid(row=0, column=0, padx=10, pady=8, sticky="we")
+        # 입력 경로 (Text로 변경하여 여러 줄 입력 가능)
+        tk.Label(master, text="검색 경로 (한 줄에 한 경로)").grid(row=0, column=0, sticky="w", padx=10)
+        self.path_text = tk.Text(master, height=4)
+        self.path_text.grid(row=1, column=0, columnspan=3, sticky="we", padx=10, pady=4)
 
-        tk.Button(master, text="경로 선택", command=self.pick_path).grid(row=0, column=1, padx=6)
-        tk.Button(master, text="실행", command=self.run_search).grid(row=0, column=2, padx=6)
+        tk.Button(master, text="경로 선택", command=self.pick_path).grid(row=1, column=3, padx=6)
+        tk.Button(master, text="실행", command=self.run_search).grid(row=1, column=4, padx=6)
 
         # 정규표현식 입력
-        tk.Label(master, text="C# Regex:").grid(row=1, column=0, sticky="w", padx=10)
+        tk.Label(master, text="C# Regex:").grid(row=2, column=0, sticky="w", padx=10)
         self.cs_regex_var = tk.StringVar(value=DEFAULT_CS_PATTERN)
         self.cs_regex_entry = tk.Entry(master, textvariable=self.cs_regex_var)
-        self.cs_regex_entry.grid(row=1, column=0, columnspan=3, sticky="we", padx=90, pady=4)
+        self.cs_regex_entry.grid(row=2, column=0, columnspan=5, sticky="we", padx=90, pady=4)
 
-        tk.Label(master, text="Java Regex:").grid(row=2, column=0, sticky="w", padx=10)
+        tk.Label(master, text="Java Regex:").grid(row=3, column=0, sticky="w", padx=10)
         self.java_regex_var = tk.StringVar(value=DEFAULT_JAVA_PATTERN)
         self.java_regex_entry = tk.Entry(master, textvariable=self.java_regex_var)
-        self.java_regex_entry.grid(row=2, column=0, columnspan=3, sticky="we", padx=90, pady=4)
+        self.java_regex_entry.grid(row=3, column=0, columnspan=5, sticky="we", padx=90, pady=4)
 
         # 타입 필터
-        tk.Label(master, text="Type:").grid(row=3, column=0, sticky="w", padx=10, pady=6)
+        tk.Label(master, text="Type:").grid(row=4, column=0, sticky="w", padx=10, pady=6)
         self.type_filter = ttk.Combobox(master, values=["all", "cs", "java"], width=8)
         self.type_filter.set("all")
-        self.type_filter.grid(row=3, column=0, padx=60, sticky="w")
+        self.type_filter.grid(row=4, column=0, padx=60, sticky="w")
         self.type_filter.bind("<<ComboboxSelected>>", lambda e: self.apply_filter())
 
         # 결과 테이블
@@ -115,24 +109,23 @@ class App:
         self.tree = ttk.Treeview(master, columns=cols, show="headings", selectmode="extended")
         for col in cols:
             self.tree.heading(col, text=col)
-        # 넓은 컬럼 설정 (파일 경로 넉넉히)
         self.tree.column("file_path", width=600, anchor="w")
         self.tree.column("file_name", width=220, anchor="w")
         self.tree.column("type", width=80, anchor="center")
         self.tree.column("categoryCode", width=220, anchor="w")
         self.tree.column("diffCode", width=220, anchor="w")
 
-        self.tree.grid(row=4, column=0, columnspan=3, sticky="nsew", padx=10, pady=8)
+        self.tree.grid(row=5, column=0, columnspan=5, sticky="nsew", padx=10, pady=8)
 
         # 스크롤바
         v_scroll = ttk.Scrollbar(master, orient="vertical", command=self.tree.yview)
         h_scroll = ttk.Scrollbar(master, orient="horizontal", command=self.tree.xview)
         self.tree.configure(yscrollcommand=v_scroll.set, xscrollcommand=h_scroll.set)
-        v_scroll.grid(row=4, column=3, sticky="ns", pady=8)
-        h_scroll.grid(row=5, column=0, columnspan=3, sticky="we", padx=10)
+        v_scroll.grid(row=5, column=5, sticky="ns", pady=8)
+        h_scroll.grid(row=6, column=0, columnspan=5, sticky="we", padx=10)
 
         # 엑셀 저장 버튼
-        tk.Button(master, text="엑셀로 저장", command=self.save_excel).grid(row=6, column=0, pady=10, sticky="w", padx=10)
+        tk.Button(master, text="엑셀로 저장", command=self.save_excel).grid(row=7, column=0, pady=10, sticky="w", padx=10)
 
         # 복사 단축키 (트리에서)
         self.tree.bind("<Control-c>", self.copy_selection)
@@ -142,36 +135,37 @@ class App:
         self.all_results = []
 
         # 그리드 가중치로 리사이즈 허용
-        master.grid_rowconfigure(4, weight=1)
+        master.grid_rowconfigure(5, weight=1)
         master.grid_columnconfigure(0, weight=1)
 
     def pick_path(self):
-        path = filedialog.askdirectory()
-        if path:
-            self.path_entry.delete(0, tk.END)
-            self.path_entry.insert(0, path)
+        paths = filedialog.askdirectory()
+        if paths:
+            current = self.path_text.get("1.0", tk.END).strip()
+            if current:
+                self.path_text.insert(tk.END, "\n" + paths)
+            else:
+                self.path_text.insert(tk.END, paths)
 
     def run_search(self):
-        path = self.path_entry.get().strip()
-        if not path:
+        raw_paths = self.path_text.get("1.0", tk.END).splitlines()
+        paths = [p.strip() for p in raw_paths if p.strip()]
+        if not paths:
             messagebox.showerror("오류", "경로를 입력하세요")
             return
 
-        # 정규식 유효성 체크
+        # 정규식 체크
         cs_pattern_raw = self.cs_regex_var.get().strip()
         java_pattern_raw = self.java_regex_var.get().strip()
         try:
-            # 컴파일해 두면 검색 시 성능도 조금 향상
-            cs_pattern = re.compile(cs_pattern_raw, flags=re.IGNORECASE)
-            java_pattern = re.compile(java_pattern_raw, flags=re.IGNORECASE)
+            re.compile(cs_pattern_raw)
+            re.compile(java_pattern_raw)
         except re.error as e:
             messagebox.showerror("정규식 오류", f"정규표현식 컴파일 실패:\n{e}")
             return
 
-        # 검색 및 결과 저장
-        self.all_results = search_files(path, cs_pattern_raw, java_pattern_raw)
+        self.all_results = search_files(paths, cs_pattern_raw, java_pattern_raw)
         self.apply_filter()
-
         messagebox.showinfo("완료", f"{len(self.all_results)}개의 결과를 찾았습니다.")
 
     def apply_filter(self):
@@ -186,19 +180,16 @@ class App:
         sel = self.tree.selection()
         if not sel:
             return
-        # 헤더 포함 복사
         header = "\t".join(["file_path", "file_name", "type", "categoryCode", "diffCode"])
         lines = [header]
         for iid in sel:
             vals = self.tree.item(iid)["values"]
-            # 문자열로 변환 (엑셀/붙여넣기 용)
             vals = [str(v) for v in vals]
             lines.append("\t".join(vals))
         txt = "\n".join(lines)
         try:
             self.master.clipboard_clear()
             self.master.clipboard_append(txt)
-            # optional: 알림 대신 상태바를 쓰면 더 나음. 여기선 간단히 토스트 안씀.
         except Exception:
             pass
 
@@ -206,14 +197,9 @@ class App:
         wb = Workbook()
         ws = wb.active
         ws.append(["file_path", "file_name", "type", "categoryCode", "diffCode"])
-
         for child in self.tree.get_children():
             ws.append(self.tree.item(child)["values"])
-
-        save_path = filedialog.asksaveasfilename(
-            defaultextension=".xlsx",
-            filetypes=[("Excel 파일", "*.xlsx")]
-        )
+        save_path = filedialog.asksaveasfilename(defaultextension=".xlsx", filetypes=[("Excel 파일", "*.xlsx")])
         if save_path:
             try:
                 wb.save(save_path)
