@@ -1,0 +1,158 @@
+import os
+import re
+import tkinter as tk
+from tkinter import filedialog, ttk, messagebox
+from openpyxl import Workbook
+
+# ============================== #
+#       핵심 파싱 로직          #
+# ============================== #
+
+# C# 패턴: GetFabOrientedUseYn(factory, categoryCode, diffCode)
+cs_pattern = re.compile(
+    r"GetFabOrientedUseYn\s*\(\s*([^,]+)\s*,\s*([^,]+)\s*,\s*([^)]+)\)",
+    re.IGNORECASE
+)
+
+# Java 패턴: selectFabOrientedUseYn(categoryCode, diffCode, factory)
+java_pattern = re.compile(
+    r"selectFabOrientedUseYn\s*\(\s*([^,]+)\s*,\s*([^,]+)\s*,\s*([^)]+)\)",
+    re.IGNORECASE
+)
+
+
+def extract_params(file_path):
+
+    results = []
+    file_name = os.path.basename(file_path)
+
+    if file_name.endswith(".designer.cs"):  
+        return results  # 제외
+
+    try:
+        with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+            data = f.read()
+    except:
+        return results
+
+    if file_name.endswith(".cs"):
+        matches = cs_pattern.findall(data)
+        for fac, cat, diff in matches:
+            results.append((
+                file_path,
+                file_name,
+                "cs",
+                cat.strip().strip('"'),
+                diff.strip().strip('"'),
+                fac.strip().strip('"')
+            ))
+
+    elif file_name.endswith(".java"):
+        matches = java_pattern.findall(data)
+        for cat, diff, fac in matches:
+            results.append((
+                file_path,
+                file_name,
+                "java",
+                cat.strip().strip('"'),
+                diff.strip().strip('"'),
+                fac.strip().strip('"')
+            ))
+
+    return results
+
+
+def search_files(path):
+    collected = []
+
+    if os.path.isfile(path):
+        return extract_params(path)
+
+    for root, dirs, files in os.walk(path):
+        for file in files:
+            if file.endswith(".cs") and not file.endswith(".designer.cs"):
+                full = os.path.join(root, file)
+                collected += extract_params(full)
+            elif file.endswith(".java"):
+                full = os.path.join(root, file)
+                collected += extract_params(full)
+
+    return collected
+
+
+# ============================== #
+#       GUI 구성 부분            #
+# ============================== #
+
+class App:
+    def __init__(self, master):
+        self.master = master
+        master.title("Fab Oriented UseYn 파라미터 추출기")
+        master.geometry("1100x600")
+
+        # 입력 경로
+        self.path_entry = tk.Entry(master, width=80)
+        self.path_entry.grid(row=0, column=0, padx=10, pady=10)
+
+        tk.Button(master, text="경로 선택", command=self.pick_path).grid(row=0, column=1)
+        tk.Button(master, text="실행", command=self.run_search).grid(row=0, column=2)
+
+        # 테이블
+        cols = ["file_path", "file_name", "type", "categoryCode", "diffCode", "factory"]
+        self.tree = ttk.Treeview(master, columns=cols, show="headings")
+        for col in cols:
+            self.tree.heading(col, text=col)
+            self.tree.column(col, width=180)
+        self.tree.grid(row=1, column=0, columnspan=3, sticky="nsew")
+
+        # 스크롤바
+        scrollbar = ttk.Scrollbar(master, orient="vertical", command=self.tree.yview)
+        self.tree.configure(yscrollcommand=scrollbar.set)
+        scrollbar.grid(row=1, column=3, sticky="ns")
+
+        # 엑셀 저장 버튼
+        tk.Button(master, text="엑셀로 저장", command=self.save_excel).grid(row=2, column=0, pady=10)
+
+    def pick_path(self):
+        path = filedialog.askdirectory()
+        if path:
+            self.path_entry.delete(0, tk.END)
+            self.path_entry.insert(0, path)
+
+    def run_search(self):
+        path = self.path_entry.get().strip()
+        if not path:
+            messagebox.showerror("오류", "경로를 입력하세요")
+            return
+
+        self.tree.delete(*self.tree.get_children())  # 초기화
+
+        results = search_files(path)
+
+        for row in results:
+            self.tree.insert("", tk.END, values=row)
+
+        messagebox.showinfo("완료", f"{len(results)}개의 결과를 찾았습니다.")
+
+    def save_excel(self):
+        wb = Workbook()
+        ws = wb.active
+        ws.append(["file_path", "file_name", "type", "categoryCode", "diffCode", "factory"])
+
+        for child in self.tree.get_children():
+            ws.append(self.tree.item(child)["values"])
+
+        save_path = filedialog.asksaveasfilename(
+            defaultextension=".xlsx",
+            filetypes=[("Excel 파일", "*.xlsx")]
+        )
+        if save_path:
+            wb.save(save_path)
+            messagebox.showinfo("완료", "엑셀 저장이 완료되었습니다.")
+
+
+# 실행
+if __name__ == "__main__":
+    root = tk.Tk()
+    app = App(root)
+    root.mainloop()
