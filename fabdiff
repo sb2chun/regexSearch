@@ -8,9 +8,22 @@ from openpyxl import Workbook
 DEFAULT_CS_PATTERN = r'GetFabOrientedUseYn\s*\(\s*([^,]+)\s*,\s*([^,]+)\s*,\s*([^)]+)\)'
 DEFAULT_JAVA_PATTERN = r'selectFabOrientedUseYn\s*\(\s*([^,]+)\s*,\s*([^,]+)\s*,\s*([^)]+)\)'
 
+def _findall_with_pattern(pattern_or_str, data, flags=re.IGNORECASE | re.DOTALL):
+    """
+    pattern_or_str: str 또는 컴파일된 re.Pattern
+    data: 검색 대상 문자열
+    flags: 문자열 패턴인 경우에만 사용
+    """
+    if hasattr(pattern_or_str, "findall"):
+        # 이미 컴파일된 패턴 객체
+        return pattern_or_str.findall(data)
+    else:
+        return re.findall(pattern_or_str, data, flags=flags)
+
 # ===== 핵심 파싱 로직 (factory는 결과에서 제외) =====
 def extract_params(file_path, cs_pattern, java_pattern):
     """
+    cs_pattern / java_pattern can be either strings or compiled re.Pattern objects.
     반환: [(file_path, file_name, type, categoryCode, diffCode), ...]
     """
     results = []
@@ -26,25 +39,49 @@ def extract_params(file_path, cs_pattern, java_pattern):
         return results
 
     if file_name.endswith(".cs"):
-        matches = re.findall(cs_pattern, data, flags=re.IGNORECASE)
-        for fac, cat, diff in matches:
+        matches = _findall_with_pattern(cs_pattern, data)
+        # matches may be list of tuples (fac, cat, diff) or strings depending on regex
+        for m in matches:
+            # ensure tuple unpack
+            if isinstance(m, tuple) and len(m) >= 3:
+                fac, cat, diff = m[0], m[1], m[2]
+            else:
+                # fallback: try to extract quoted params inside the matched string
+                fac = cat = diff = ""
+                params = re.findall(r'"(.*?)"|\'(.*?)\'', m)
+                # params is list of tuples from the alternation groups; flatten
+                flat = [p[0] or p[1] for p in params]
+                if len(flat) >= 3:
+                    fac, cat, diff = flat[0], flat[1], flat[2]
+                else:
+                    continue
             results.append((
                 file_path,
                 file_name,
                 "cs",
-                cat.strip().strip('"').strip("'"),
-                diff.strip().strip('"').strip("'")
+                str(cat).strip().strip('"').strip("'"),
+                str(diff).strip().strip('"').strip("'")
             ))
 
     elif file_name.endswith(".java"):
-        matches = re.findall(java_pattern, data, flags=re.IGNORECASE)
-        for cat, diff, fac in matches:
+        matches = _findall_with_pattern(java_pattern, data)
+        for m in matches:
+            if isinstance(m, tuple) and len(m) >= 3:
+                cat, diff, fac = m[0], m[1], m[2]
+            else:
+                fac = cat = diff = ""
+                params = re.findall(r'"(.*?)"|\'(.*?)\'', m)
+                flat = [p[0] or p[1] for p in params]
+                if len(flat) >= 3:
+                    cat, diff, fac = flat[0], flat[1], flat[2]
+                else:
+                    continue
             results.append((
                 file_path,
                 file_name,
                 "java",
-                cat.strip().strip('"').strip("'"),
-                diff.strip().strip('"').strip("'")
+                str(cat).strip().strip('"').strip("'"),
+                str(diff).strip().strip('"').strip("'")
             ))
 
     return results
@@ -53,17 +90,21 @@ def extract_params(file_path, cs_pattern, java_pattern):
 def search_files(paths, cs_pattern_raw, java_pattern_raw):
     """
     paths: list of path strings (files or directories)
-    cs_pattern_raw, java_pattern_raw: regex strings (will be compiled inside)
+    cs_pattern_raw, java_pattern_raw: regex strings (we'll compile them and pass compiled patterns)
     """
     collected = []
-    # compile once for speed
+    # Try compile; if compilation fails, fallback to defaults (but inform)
     try:
-        cs_compiled = re.compile(cs_pattern_raw, flags=re.IGNORECASE)
-        java_compiled = re.compile(java_pattern_raw, flags=re.IGNORECASE)
-    except re.error:
-        # caller should validate, but safe fallback
-        cs_compiled = re.compile(DEFAULT_CS_PATTERN, flags=re.IGNORECASE)
-        java_compiled = re.compile(DEFAULT_JAVA_PATTERN, flags=re.IGNORECASE)
+        cs_compiled = re.compile(cs_pattern_raw, flags=re.IGNORECASE | re.DOTALL)
+    except re.error as e:
+        messagebox.showwarning("정규식 경고", f"C# 정규표현식 컴파일 실패, 기본 패턴으로 대체합니다.\n{e}")
+        cs_compiled = re.compile(DEFAULT_CS_PATTERN, flags=re.IGNORECASE | re.DOTALL)
+
+    try:
+        java_compiled = re.compile(java_pattern_raw, flags=re.IGNORECASE | re.DOTALL)
+    except re.error as e:
+        messagebox.showwarning("정규식 경고", f"Java 정규표현식 컴파일 실패, 기본 패턴으로 대체합니다.\n{e}")
+        java_compiled = re.compile(DEFAULT_JAVA_PATTERN, flags=re.IGNORECASE | re.DOTALL)
 
     for path in paths:
         path = path.strip()
@@ -197,42 +238,29 @@ class App:
         for (category, diff), files in sorted(grouped.items(), key=lambda x: (x[0][0], x[0][1])):
             count = len(files)
             parent_text = f"{category}\t{diff}\t({count} files)"
-            # parent row values: show parent_text in file_path column, leave file_name/type empty, keep category/diff in columns as well
             parent_iid = self.tree.insert("", tk.END, values=(parent_text, "", "", category, diff), open=False)
             self.group_map[parent_iid] = (category, diff)
-            # add children
             for full_path, file_name, ftype in sorted(files):
-                # child shows actual path and filename and type; category/diff left empty to reduce clutter
                 self.tree.insert(parent_iid, tk.END, values=(full_path, file_name, ftype, "", ""))
 
         messagebox.showinfo("완료", f"{sum(len(v) for v in grouped.values())}개의 고유 그룹으로 검색완료 ({len(self.all_results)} raw matches).")
 
     def copy_category_diff(self):
-        """
-        선택된 항목의 그룹(category,diff)을 클립보드에 복사.
-        - 선택이 부모(그룹)면 해당 그룹복사
-        - 선택이 자식이면 부모 그룹 찾아 복사
-        - 여러 선택 가능: 여러 그룹을 선택하면 각 줄에 복사
-        """
         sel = self.tree.selection()
         if not sel:
             return
         to_copy = []
         seen = set()
         for iid in sel:
-            # 올라가며 부모 찾기
             cur = iid
             parent = self.tree.parent(cur)
             if parent == "":
-                # 선택한게 부모(그룹)
                 if cur in self.group_map:
                     key = self.group_map[cur]
                     if key not in seen:
                         to_copy.append(key)
                         seen.add(key)
             else:
-                # 자식인 경우 부모는 parent (maybe nested deeper but we have only two levels)
-                # find top-level parent
                 top = parent
                 while self.tree.parent(top):
                     top = self.tree.parent(top)
@@ -257,21 +285,15 @@ class App:
             messagebox.showerror("오류", "클립보드 복사 실패")
 
     def save_excel(self):
-        """
-        엑셀로 저장: 각 그룹(카테고리/디프) 행 뒤에 해당 그룹의 파일 경로/파일명을 추가로 열에 병합해서 저장
-        """
-        # 준비: collect displayed groups from tree
         rows = []
         for parent in self.tree.get_children():
             vals = self.tree.item(parent, "values")
-            # vals: (parent_text, "", "", category, diff)
             category = vals[3]
             diff = vals[4]
-            # gather child paths
             child_paths = []
             for child in self.tree.get_children(parent):
                 cvals = self.tree.item(child, "values")
-                child_paths.append(cvals[0])  # full path
+                child_paths.append(cvals[0])
             rows.append((category, diff, "; ".join(child_paths)))
 
         if not rows:
