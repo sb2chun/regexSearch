@@ -1,11 +1,12 @@
+# param_extractor_fixed2.py
 import os
 import re
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
-# 사용자가 요구한 기본 패턴 (3개의 캡처 그룹)
-DEFAULT_CS_PATTERN = r'GetFabOrientedUseYn\s*\(\s*([^,]+)\s*,\s*([^,]+)\s*,\s*([^)]+)\)'
-DEFAULT_JAVA_PATTERN = r'selectFabOrientedUseYn\s*\(\s*([^,]+)\s*,\s*([^,]+)\s*,\s*([^)]+)\)'
+# 기본: 괄호 내부 전체를 캡처 (DOTALL)
+DEFAULT_CS_PATTERN = r'GetFabOrientedUseYn\s*\((.*?)\)'
+DEFAULT_JAVA_PATTERN = r'selectFabOrientedUseYn\s*\((.*?)\)'
 
 # 안전한 인자 분리: nested parentheses/brackets/quotes 무시하고 top-level comma로 분리
 def split_args_top_level(argstr: str):
@@ -76,46 +77,32 @@ def extract_from_file(filepath, cs_re, java_re):
     if fname.endswith(".designer.cs"):
         return out
 
-    # CS: look for matches using the compiled pattern (which might have 3 capture groups or 1)
+    # CS: finditer on cs_re (which captures inner parentheses as group(1))
     if fname.lower().endswith(".cs"):
-        for m in cs_re.findall(text):
-            # m can be tuple (group1,group2,group3) if pattern has groups,
-            # or string if pattern has single capturing group (e.g. inner parentheses)
-            if isinstance(m, tuple):
-                # expect (factory, category, diff)
-                if len(m) >= 3:
-                    cat = strip_quotes(m[1])
-                    diff = strip_quotes(m[2])
-                    out.append((filepath, fname, "cs", cat, diff))
-            else:
-                # m is the inner parentheses content: split safely
-                args = split_args_top_level(m)
+        for m in cs_re.finditer(text):
+            inner = m.group(1)
+            args = split_args_top_level(inner)
+            # need at least 2 args; for CS use last-2=category, last-1=diff
+            if len(args) >= 2:
                 if len(args) >= 2:
                     cat = strip_quotes(args[-2])
                     diff = strip_quotes(args[-1])
                     out.append((filepath, fname, "cs", cat, diff))
 
-    # JAVA
+    # JAVA: first two args
     if fname.lower().endswith(".java"):
-        for m in java_re.findall(text):
-            if isinstance(m, tuple):
-                # expect (category, diff, factory)
-                if len(m) >= 2:
-                    cat = strip_quotes(m[0])
-                    diff = strip_quotes(m[1])
-                    out.append((filepath, fname, "java", cat, diff))
-            else:
-                args = split_args_top_level(m)
-                if len(args) >= 2:
-                    cat = strip_quotes(args[0])
-                    diff = strip_quotes(args[1])
-                    out.append((filepath, fname, "java", cat, diff))
+        for m in java_re.finditer(text):
+            inner = m.group(1)
+            args = split_args_top_level(inner)
+            if len(args) >= 2:
+                cat = strip_quotes(args[0])
+                diff = strip_quotes(args[1])
+                out.append((filepath, fname, "java", cat, diff))
 
     return out
 
 # 검색 루프: 여러 경로(파일/디렉토리) 순회
 def search_paths(paths, cs_pattern_raw, java_pattern_raw):
-    # compile with DOTALL to allow multiline inside parentheses
     try:
         cs_re = re.compile(cs_pattern_raw, flags=re.IGNORECASE | re.DOTALL)
     except re.error:
@@ -126,6 +113,7 @@ def search_paths(paths, cs_pattern_raw, java_pattern_raw):
         java_re = re.compile(DEFAULT_JAVA_PATTERN, flags=re.IGNORECASE | re.DOTALL)
 
     aggregated = {}  # (cat, diff) -> {"cs": set(paths), "java": set(paths)}
+    total_raw_matches = 0
     for base in paths:
         if not os.path.exists(base):
             continue
@@ -141,18 +129,19 @@ def search_paths(paths, cs_pattern_raw, java_pattern_raw):
                 continue
             recs = extract_from_file(fp, cs_re, java_re)
             for _fp, _fname, ftype, cat, diff in recs:
+                total_raw_matches += 1
                 key = (cat, diff)
                 if key not in aggregated:
                     aggregated[key] = {"cs": set(), "java": set()}
                 aggregated[key][ftype].add(_fp)
-    return aggregated
+    return aggregated, total_raw_matches
 
 # ---------- GUI ----------
 class App:
     def __init__(self, root):
         self.root = root
         root.title("Fab Param Extractor (CS/Java)")
-        root.geometry("1200x760")
+        root.geometry("1250x820")
         root.minsize(900, 600)
 
         # paths input
@@ -164,7 +153,7 @@ class App:
         btn_add.pack(anchor="w", padx=6, pady=(0,6))
 
         # regex inputs
-        frm_regex = ttk.LabelFrame(root, text="정규표현식 (기본: 네가 준 패턴을 사용)")
+        frm_regex = ttk.LabelFrame(root, text="정규표현식 (기본: 괄호 내부 캡처)")
         frm_regex.pack(fill="x", padx=10, pady=6)
         lbl_cs = ttk.Label(frm_regex, text="C# 패턴:")
         lbl_cs.grid(row=0, column=0, sticky="w", padx=6, pady=4)
@@ -190,15 +179,16 @@ class App:
         ttk.Button(frm_actions, text="전체 복사 (선택된 행)", command=self.copy_all).pack(side="right", padx=6)
         ttk.Button(frm_actions, text="category/diff 복사 (선택)", command=self.copy_category_diff).pack(side="right", padx=6)
 
-        # treeview for grouped results
-        frm_results = ttk.LabelFrame(root, text="검색 결과 (중복 그룹화: category/diff 기준)")
+        # treeview for grouped results (with No column)
+        frm_results = ttk.LabelFrame(root, text="검색 결과 (그룹화: category/diff 기준)")
         frm_results.pack(fill="both", expand=True, padx=10, pady=6)
-        cols = ("file_path", "file_name", "type", "category", "diff")
+        cols = ("No", "file_path", "file_name", "type", "category", "diff")
         self.tree = ttk.Treeview(frm_results, columns=cols, show="headings", selectmode="extended")
         for c in cols:
             self.tree.heading(c, text=c)
-            # make path column wide
-            if c == "file_path":
+            if c == "No":
+                self.tree.column(c, width=60, anchor="center")
+            elif c == "file_path":
                 self.tree.column(c, width=600, anchor="w")
             else:
                 self.tree.column(c, width=140, anchor="w")
@@ -207,11 +197,12 @@ class App:
         sb_v.pack(side="right", fill="y")
         self.tree.configure(yscrollcommand=sb_v.set)
 
-        # keyboard bindings
+        # keyboard: Ctrl+C -> copy category/diff (default)
         root.bind_all("<Control-c>", lambda e: self.copy_category_diff())
 
-        # internal storage of last aggregated results
+        # internal
         self.aggregated = {}
+        self.total_raw_matches = 0
 
     def add_path_dialog(self):
         p = filedialog.askdirectory()
@@ -237,17 +228,19 @@ class App:
             messagebox.showerror("정규식 오류", f"정규식 컴파일 실패: {e}")
             return
 
-        self.aggregated = search_paths(paths, cs_pat, java_pat)
+        self.aggregated, self.total_raw_matches = search_paths(paths, cs_pat, java_pat)
         self.populate_tree()
+
+        # show counts: unique groups and total raw matches
+        unique_count = len(self.aggregated)
+        messagebox.showinfo("완료", f"검색 완료 — 고유 그룹: {unique_count}건, 전체 매칭(파일 호출 수): {self.total_raw_matches}건")
 
     def populate_tree(self):
         # clear
         for iid in self.tree.get_children():
             self.tree.delete(iid)
         filter_type = self.type_var.get()
-        # For each (cat,diff) group, create a single row. If multiple files:
-        # - show file_path as one sample path with " (N files)" appended
-        # - type shows all types present (comma-separated) but if same type only show once
+        idx = 1
         for (cat, diff), type_map in sorted(self.aggregated.items(), key=lambda x: (x[0][0], x[0][1])):
             cs_files = sorted(type_map["cs"])
             java_files = sorted(type_map["java"])
@@ -268,7 +261,9 @@ class App:
             if java_files:
                 types.append("java")
             type_display = ",".join(types)
-            self.tree.insert("", "end", values=(display_path, os.path.basename(sample), type_display, cat, diff))
+            # insert with No
+            self.tree.insert("", "end", values=(idx, display_path, os.path.basename(sample), type_display, cat, diff))
+            idx += 1
 
     def copy_all(self):
         sel = self.tree.selection()
@@ -277,7 +272,6 @@ class App:
         lines = []
         for iid in sel:
             vals = self.tree.item(iid, "values")
-            # join everything
             lines.append("\t".join(str(v) for v in vals))
         try:
             self.root.clipboard_clear()
@@ -294,7 +288,7 @@ class App:
         seen = set()
         for iid in sel:
             vals = self.tree.item(iid, "values")
-            key = (vals[3], vals[4])  # category, diff
+            key = (vals[4], vals[5])  # category, diff
             if key not in seen:
                 pairs.append(key)
                 seen.add(key)
