@@ -1,10 +1,10 @@
-# param_extractor_fixed2.py
+# param_extractor_final.py
 import os
 import re
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
-# 기본: 괄호 내부 전체를 캡처 (DOTALL)
+# 기본: 괄호 내부 전체를 캡처 (DOTALL 사용)
 DEFAULT_CS_PATTERN = r'GetFabOrientedUseYn\s*\((.*?)\)'
 DEFAULT_JAVA_PATTERN = r'selectFabOrientedUseYn\s*\((.*?)\)'
 
@@ -74,29 +74,34 @@ def extract_from_file(filepath, cs_re, java_re):
         return out
 
     fname = os.path.basename(filepath)
-    if fname.endswith(".designer.cs"):
+    # exclude designer files case-insensitively
+    if fname.lower().endswith(".designer.cs"):
         return out
 
-    # CS: finditer on cs_re (which captures inner parentheses as group(1))
+    # CS files
     if fname.lower().endswith(".cs"):
         for m in cs_re.finditer(text):
-            inner = m.group(1)
+            inner = m.group(1)  # inner parentheses content
             args = split_args_top_level(inner)
-            # need at least 2 args; for CS use last-2=category, last-1=diff
+            # CS: category = args[-2], diff = args[-1] if available
             if len(args) >= 2:
-                if len(args) >= 2:
-                    cat = strip_quotes(args[-2])
-                    diff = strip_quotes(args[-1])
-                    out.append((filepath, fname, "cs", cat, diff))
+                cat_raw = args[-2]
+                diff_raw = args[-1]
+                cat = strip_quotes(cat_raw)
+                diff = strip_quotes(diff_raw)
+                out.append((filepath, fname, "cs", cat, diff))
 
-    # JAVA: first two args
+    # Java files
     if fname.lower().endswith(".java"):
         for m in java_re.finditer(text):
             inner = m.group(1)
             args = split_args_top_level(inner)
+            # Java: category = args[0], diff = args[1]
             if len(args) >= 2:
-                cat = strip_quotes(args[0])
-                diff = strip_quotes(args[1])
+                cat_raw = args[0]
+                diff_raw = args[1]
+                cat = strip_quotes(cat_raw)
+                diff = strip_quotes(diff_raw)
                 out.append((filepath, fname, "java", cat, diff))
 
     return out
@@ -125,7 +130,8 @@ def search_paths(paths, cs_pattern_raw, java_pattern_raw):
                 for fn in files:
                     file_list.append(os.path.join(root, fn))
         for fp in file_list:
-            if not (fp.lower().endswith(".cs") or fp.lower().endswith(".java")):
+            low = fp.lower()
+            if not (low.endswith(".cs") or low.endswith(".java")):
                 continue
             recs = extract_from_file(fp, cs_re, java_re)
             for _fp, _fname, ftype, cat, diff in recs:
