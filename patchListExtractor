@@ -56,15 +56,16 @@ TARGET_EXTENSIONS = (".java", ".cs")
 # =========================================================
 # 2. 정규표현식 - 함수명이 상이할 수 있다고 하셨으니 실제 소스 보고 조정 필요
 # =========================================================
-# 그룹: factory, fabUseYnValue (순서 고정이라고 가정. 다르면 조정)
+# getFabUseYn(어떤변수, "추출값") → 2번째 인자(따옴표 안)만 캡처
 FABUSE_REGEX = re.compile(
-    r"getFabUseYn\s*\(\s*([A-Za-z0-9_\.\"]+)\s*,\s*\"([^\"]+)\"\s*\)"
+    r"getFabUseYn\s*\(\s*[^,]+,\s*\"([^\"]+)\"\s*\)"
 )
 
-# getFabOriented / selectFabOriented 둘 다 매칭. 인자 3개를 통째로 캡쳐 후
-# 언어(java/cs)별로 인자 순서가 다르다고 하셨으므로 파일 확장자 기준으로 후처리에서 매핑.
+# getFabOriented / selectFabOriented ("catgCd", "difCd", factory)
+# 언어 무관하게 1번째=catgCd, 2번째=difCd, 3번째=factory 로 통일
+# → 1번째, 2번째 인자(따옴표 안)만 캡처
 FABDIF_REGEX = re.compile(
-    r"(getFabOriented|selectFabOriented)\s*\(\s*([^)]+?)\s*\)"
+    r"(?:getFabOriented|selectFabOriented)\s*\(\s*\"([^\"]+)\"\s*,\s*\"([^\"]+)\"\s*,\s*[^)]+\)"
 )
 
 # =========================================================
