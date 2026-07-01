@@ -2,77 +2,70 @@
 """
 FabUseYn / FabDif 커밋 범위 조회 도구
 ====================================
-특정 git 브랜치의 from~to 커밋 사이에 변경된 파일들을 스캔하여
-getFabUseYn / getFabOriented / selectFabOriented 호출을 정규식으로 추출하고,
-Oracle DB에 해당 값이 등록되어 있는지 조회해서 보여주는 도구입니다.
-
-★★★ 본인 환경에 맞게 꼭 수정해야 하는 부분 ★★★
-  1) DB_CONFIG (user, password, dsn - TNS명)
-  2) FACTORY_LIST (실제 팩토리 코드 목록)
-  3) FABUSE_REGEX / FABDIF_REGEX (함수명 다를 경우 조정)
-  4) QUERY_FABUSE / QUERY_FABDIF (쿼리 수정)
-  5) GIT_REPO_PATH_DEFAULT (기본 git 경로)
-
-tnsnames.ora 위치: C:/tnsname/ 고정
-Oracle Client 경로: PATH 또는 흔한 설치 경로 자동 탐색
+★★★ 본인 환경에 맞게 수정할 부분 ★★★
+  1) DB_CONFIG_BONSA / DB_CONFIG_WUSI
+  2) BONSA_FACTORIES / WUSI_FACTORIES
+  3) FABUSE_REGEX / FABDIF_REGEX
+  4) QUERY_FABUSE / QUERY_FABDIF
+  5) GIT_REPO_PATH_DEFAULT
 """
 
 import os
 import re
-import csv
 import glob
 import threading
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
-import git       # pip install GitPython
-import oracledb  # pip install python-oracledb
+import git
+import oracledb
+import openpyxl
+from openpyxl.styles import PatternFill, Font, Alignment
 
 
 # =========================================================
 # 1. 환경 설정
 # =========================================================
-
 GIT_REPO_PATH_DEFAULT = r"C:\git\your_repo"
 
-DB_CONFIG = {
+# 본사 DB
+DB_CONFIG_BONSA = {
     "user":     "DB_USER",
     "password": "DB_PASSWORD",
-    "dsn":      "TNS명",   # tnsnames.ora 에 등록된 서비스명
+    "host":     "10.10.10.10",
+    "port":     1521,
+    "service":  "BONSA_SVC",
 }
 
-# tnsnames.ora 위치 (전사 고정 경로)
-TNS_CONFIG_DIR = r"C:\tnsname"
+# 우시 DB
+DB_CONFIG_WUSI = {
+    "user":     "DB_USER",
+    "password": "DB_PASSWORD",
+    "host":     "10.10.10.11",
+    "port":     1521,
+    "service":  "WUSI_SVC",
+}
 
-# FabDif 결과 팩토리 컬럼 목록 (순서대로 출력)
-FACTORY_LIST = ["M10", "M11", "M12", "M13", "M14", "M16", "C2"]
+# 팩토리 목록 (소스에서 직접 관리)
+BONSA_FACTORIES = ["M10", "M11", "M12", "M13", "M14", "M16"]
+WUSI_FACTORIES  = ["C2"]
 
-# 스캔 대상 소스 확장자
-TARGET_EXTENSIONS = (".java", ".cs")
-
-# B안(변경점 검색)에서 추가/삭제 라인 앞뒤 컨텍스트 줄 수
+TARGET_EXTENSIONS  = (".java", ".cs")
 DIFF_CONTEXT_LINES = 10
 
 
 # =========================================================
 # 2. 정규표현식
 # =========================================================
-# getFabUseYn(어떤변수, "추출값")  →  2번째 인자(따옴표 안)만 캡처
-# 수정 후
+# getFabUseYn("팹코드", ...) → 첫 번째 인자만 캡처 (인자 수 무관)
 FABUSE_REGEX = re.compile(
-    r"getFabUseYn\s*\(\s*\"([^\"]+)\"\s*\)"
+    r"getFabUseYn\s*\(\s*\"([^\"]+)\""
 )
 
-# getFabOriented / selectFabOriented ("catgCd", "difCd", factory)
-# 언어 무관 1번째=catgCd, 2번째=difCd, 3번째=factory
-# →  1번째, 2번째 인자(따옴표 안)만 캡처
-FABDIF_REGEX = re.compile(
-    r"(?:getFabOriented|selectFabOriented)\s*\(\s*\"([^\"]+)\"\s*,\s*\"([^\"]+)\"\s*,\s*[^)]+\)"
-)
+# getFabOrientedUseYn("catgCd", "difCd", factory) → 1·2번째 인자만 캡처
 FABDIF_REGEX = re.compile(
     r"getFabOrientedUseYn\s*\(\s*\"([^\"]+)\"\s*,\s*\"([^\"]+)\"\s*,\s*[^)]+\)"
 )
-
 
 
 # =========================================================
@@ -94,34 +87,27 @@ QUERY_FABDIF = """
 
 
 # =========================================================
-# 4. Oracle Client 초기화 (앱 실행 중 1회만)
+# 4. Oracle Client 초기화 (프로세스당 1회)
 # =========================================================
 _oracle_client_initialized = False
 
 
 def _find_oracle_client_lib():
-    """
-    Oracle Client oci.dll 경로 자동 탐색.
-    1) PATH 환경변수에 이미 잡혀 있으면 None 반환 (lib_dir 생략)
-    2) 흔한 설치 경로 패턴을 순서대로 탐색
-    """
     for p in os.environ.get("PATH", "").split(";"):
         if os.path.exists(os.path.join(p.strip(), "oci.dll")):
-            return None  # 이미 PATH에 있음 → lib_dir 불필요
-
-    search_patterns = [
+            return None
+    patterns = [
         r"C:\oracle\instantclient*",
         r"C:\instantclient*",
         r"C:\oracle\product\*\client_1\bin",
         r"C:\app\*\product\*\client_1\bin",
         r"C:\Program Files\Oracle\instantclient*",
     ]
-    for pattern in search_patterns:
-        for match in sorted(glob.glob(pattern), reverse=True):  # 버전 높은 것 우선
+    for pattern in patterns:
+        for match in sorted(glob.glob(pattern), reverse=True):
             if os.path.exists(os.path.join(match, "oci.dll")):
                 return match
-
-    return None  # 못 찾으면 None (oracledb 가 에러를 냄)
+    return None
 
 
 def _init_oracle_client():
@@ -130,18 +116,23 @@ def _init_oracle_client():
         return
     lib_dir = _find_oracle_client_lib()
     if lib_dir:
-        oracledb.init_oracle_client(lib_dir=lib_dir, config_dir=TNS_CONFIG_DIR)
+        oracledb.init_oracle_client(lib_dir=lib_dir)
     else:
-        oracledb.init_oracle_client(config_dir=TNS_CONFIG_DIR)
+        oracledb.init_oracle_client()
     _oracle_client_initialized = True
 
 
-def get_connection():
+def get_connection(db_config):
     _init_oracle_client()
+    dsn = oracledb.makedsn(
+        db_config["host"],
+        db_config["port"],
+        sid=db_config["service"],
+    )
     return oracledb.connect(
-        user=DB_CONFIG["user"],
-        password=DB_CONFIG["password"],
-        dsn=DB_CONFIG["dsn"],
+        user=db_config["user"],
+        password=db_config["password"],
+        dsn=dsn,
     )
 
 
@@ -149,14 +140,13 @@ def get_connection():
 # 5. Git 관련 함수
 # =========================================================
 def _resolve_diff_range(from_commit, to_commit):
-    """from == to 면 단일 커밋 조회로 자동 전환"""
+    """from == to 이면 단일 커밋 조회로 자동 전환"""
     if from_commit == to_commit:
         return f"{to_commit}~1..{to_commit}"
     return f"{from_commit}..{to_commit}"
 
 
 def get_changed_files(repo_path, branch, from_commit, to_commit):
-    """from~to 사이 변경된 파일 목록 (대상 확장자만)"""
     repo = git.Repo(repo_path)
     diff_range = _resolve_diff_range(from_commit, to_commit)
     diff_index = repo.git.diff("--name-only", diff_range)
@@ -166,7 +156,6 @@ def get_changed_files(repo_path, branch, from_commit, to_commit):
 
 
 def get_file_content_at_commit(repo, commit, filepath):
-    """A안: to 커밋 시점의 파일 전체 내용"""
     try:
         return repo.git.show(f"{commit}:{filepath}")
     except git.exc.GitCommandError:
@@ -174,47 +163,32 @@ def get_file_content_at_commit(repo, commit, filepath):
 
 
 def get_changed_content(repo, from_commit, to_commit, filepath):
-    """
-    B안: diff 에서 추가(+)된 라인 + 앞뒤 컨텍스트만 반환.
-    삭제(-)된 라인은 제외.
-    """
     diff_range = _resolve_diff_range(from_commit, to_commit)
     try:
         diff_text = repo.git.diff(
-            f"-U{DIFF_CONTEXT_LINES}",
-            diff_range,
-            "--",
-            filepath,
+            f"-U{DIFF_CONTEXT_LINES}", diff_range, "--", filepath
         )
     except git.exc.GitCommandError:
         return None
-
     if not diff_text:
         return None
-
-    kept_lines = []
+    kept = []
     for line in diff_text.splitlines():
         if line.startswith(("+++", "---", "@@", "diff ", "index ")):
             continue
         if line.startswith("-"):
             continue
         if line.startswith("+"):
-            kept_lines.append(line[1:])
+            kept.append(line[1:])
         elif line.startswith(" "):
-            kept_lines.append(line[1:])
-    return "\n".join(kept_lines) if kept_lines else None
+            kept.append(line[1:])
+    return "\n".join(kept) if kept else None
 
 
 def get_last_author(repo, from_commit, to_commit, filepath):
-    """from~to 범위에서 해당 파일을 마지막으로 수정한 커밋의 author"""
     diff_range = _resolve_diff_range(from_commit, to_commit)
     try:
-        log = repo.git.log(
-            diff_range,
-            "--format=%an",
-            "--",
-            filepath,
-        )
+        log = repo.git.log(diff_range, "--format=%an", "--", filepath)
         authors = [a for a in log.splitlines() if a.strip()]
         if authors:
             return authors[0]
@@ -224,85 +198,114 @@ def get_last_author(repo, from_commit, to_commit, filepath):
 
 
 # =========================================================
-# 6. 정규식 추출 함수
+# 6. 정규식 추출
 # =========================================================
 def extract_fabuse_calls(content):
-    """2번째 인자(fabUseYnValue)만 추출 → [value, ...]"""
     if not content:
         return []
     return [m.group(1) for m in FABUSE_REGEX.finditer(content)]
 
 
 def extract_fabdif_calls(content, filepath):
-    """1번째=catgCd, 2번째=difCd → [(catgCd, difCd), ...]"""
     if not content:
         return []
     return [(m.group(1), m.group(2)) for m in FABDIF_REGEX.finditer(content)]
 
 
 # =========================================================
-# 7. DB 조회 함수
+# 7. DB 조회
 # =========================================================
-def query_fabuse(conn, fab_use_yn_value):
-    """반환: 'Y' / 'N' / 'X'(없음)"""
+def query_fabuse(conn, value):
     cur = conn.cursor()
-    cur.execute(QUERY_FABUSE, fabUseYnValue=fab_use_yn_value)
+    cur.execute(QUERY_FABUSE, fabUseYnValue=value)
     row = cur.fetchone()
     cur.close()
-    if row is None:
-        return "X"
-    return row[0] if row[0] is not None else "X"
+    return row[0] if (row and row[0] is not None) else "X"
 
 
-def query_fabdif(conn, catg_cd, dif_cd):
-    """반환: {factory: 'Y'/'N'/'X', ...} - FACTORY_LIST 전체"""
-    cur = conn.cursor()
-    cur.execute(QUERY_FABDIF, catgCd=catg_cd, difCd=dif_cd)
-    rows = cur.fetchall()
-    cur.close()
+def query_fabdif(conns, catg_cd, dif_cd, active_factories):
+    """
+    conns: {"bonsa": conn, "wusi": conn} 활성화된 것만 포함
+    active_factories: 현재 조회할 팩토리 목록
+    반환: {factory: Y/N/X}
+    """
+    result = {f: "X" for f in active_factories}
 
-    result = {f: "X" for f in FACTORY_LIST}
-    for factory, use_yn in rows:
-        if factory in result:
-            result[factory] = use_yn if use_yn is not None else "X"
+    if "bonsa" in conns:
+        cur = conns["bonsa"].cursor()
+        cur.execute(QUERY_FABDIF, catgCd=catg_cd, difCd=dif_cd)
+        for factory, use_yn in cur.fetchall():
+            if factory in result:
+                result[factory] = use_yn if use_yn is not None else "X"
+        cur.close()
+
+    if "wusi" in conns:
+        cur = conns["wusi"].cursor()
+        cur.execute(QUERY_FABDIF, catgCd=catg_cd, difCd=dif_cd)
+        for factory, use_yn in cur.fetchall():
+            if factory in result:
+                result[factory] = use_yn if use_yn is not None else "X"
+        cur.close()
+
     return result
 
 
 # =========================================================
 # 8. 메인 분석 로직
 # =========================================================
-def analyze(repo_path, branch, from_commit, to_commit, scan_mode="full", progress_cb=None):
+def analyze(repo_path, branch, from_commit, to_commit,
+            scan_mode, use_bonsa, use_wusi, progress_cb=None):
     """
-    scan_mode: "full" (A안 - 파일 전체) / "diff" (B안 - 변경분만)
-    반환: list of dict rows
+    반환: (rows, active_factories)
+    중복 제거: fabUse는 value 기준, fabDif는 (catgCd, difCd) 기준
     """
     repo, files = get_changed_files(repo_path, branch, from_commit, to_commit)
+
+    active_factories = []
+    if use_bonsa:
+        active_factories += BONSA_FACTORIES
+    if use_wusi:
+        active_factories += WUSI_FACTORIES
+
+    conns = {}
+    if use_bonsa:
+        conns["bonsa"] = get_connection(DB_CONFIG_BONSA)
+    if use_wusi:
+        conns["wusi"] = get_connection(DB_CONFIG_WUSI)
+
+    # fabUse용 연결 (본사 우선, 없으면 우시)
+    fabuse_conn = conns.get("bonsa") or conns.get("wusi")
+
     rows = []
-    conn = get_connection()
+    seen_fabuse = set()
+    seen_fabdif = set()
+
     try:
         total = len(files)
         for idx, filepath in enumerate(files):
             if progress_cb:
                 progress_cb(idx + 1, total, filepath)
 
-            if scan_mode == "diff":
-                content = get_changed_content(repo, from_commit, to_commit, filepath)
-            else:
-                content = get_file_content_at_commit(repo, to_commit, filepath)
-
+            content = (
+                get_changed_content(repo, from_commit, to_commit, filepath)
+                if scan_mode == "diff"
+                else get_file_content_at_commit(repo, to_commit, filepath)
+            )
             if content is None:
                 continue
 
-            author = get_last_author(repo, from_commit, to_commit, filepath)
-
+            author       = get_last_author(repo, from_commit, to_commit, filepath)
             fabuse_calls = extract_fabuse_calls(content)
             fabdif_calls = extract_fabdif_calls(content, filepath)
 
             if not fabuse_calls and not fabdif_calls:
-                continue  # fabUse/fabDif 없는 파일 제외
+                continue
 
             for value in fabuse_calls:
-                yn = query_fabuse(conn, value)
+                if value in seen_fabuse:
+                    continue
+                seen_fabuse.add(value)
+                yn = query_fabuse(fabuse_conn, value) if fabuse_conn else "X"
                 rows.append({
                     "file":            filepath,
                     "author":          author,
@@ -315,7 +318,11 @@ def analyze(repo_path, branch, from_commit, to_commit, scan_mode="full", progres
                 })
 
             for catg_cd, dif_cd in fabdif_calls:
-                factory_results = query_fabdif(conn, catg_cd, dif_cd)
+                key = (catg_cd, dif_cd)
+                if key in seen_fabdif:
+                    continue
+                seen_fabdif.add(key)
+                factory_results = query_fabdif(conns, catg_cd, dif_cd, active_factories)
                 rows.append({
                     "file":            filepath,
                     "author":          author,
@@ -327,9 +334,13 @@ def analyze(repo_path, branch, from_commit, to_commit, scan_mode="full", progres
                     "factory_results": factory_results,
                 })
     finally:
-        conn.close()
+        for conn in conns.values():
+            try:
+                conn.close()
+            except Exception:
+                pass
 
-    return rows
+    return rows, active_factories
 
 
 # =========================================================
@@ -339,74 +350,120 @@ class App:
     def __init__(self, root):
         self.root = root
         root.title("FabUseYn / FabDif 커밋 범위 조회 도구")
-        root.geometry("1300x700")
+        root.geometry("1400x750")
 
-        self.rows_data = []
+        self.rows_data       = []
+        self.active_factories = []
+
+        # 트리 프레임 참조 (재생성용)
+        self._tree_new_frame   = None
+        self._tree_exist_frame = None
+        self.tree_new          = None
+        self.tree_exist        = None
 
         self._build_input_frame()
         self._build_regex_info_frame()
-        self._build_result_tree()
+        self._build_tree_area()
         self._build_bottom_frame()
 
-    # ---------- 입력 영역 ----------
+    # ── 입력 영역 ──────────────────────────────────────────
     def _build_input_frame(self):
         frm = ttk.LabelFrame(self.root, text="조회 조건")
         frm.pack(fill="x", padx=8, pady=6)
 
-        ttk.Label(frm, text="Git 저장소 경로:").grid(row=0, column=0, sticky="e", padx=4, pady=4)
+        # Git 경로
+        ttk.Label(frm, text="Git 저장소 경로:").grid(row=0, column=0, sticky="e", padx=4, pady=3)
         self.repo_path_var = tk.StringVar(value=GIT_REPO_PATH_DEFAULT)
         ttk.Entry(frm, textvariable=self.repo_path_var, width=55).grid(
-            row=0, column=1, padx=4, pady=4, columnspan=3, sticky="we")
+            row=0, column=1, columnspan=3, sticky="we", padx=4, pady=3)
         ttk.Button(frm, text="찾아보기", command=self._browse_repo).grid(
-            row=0, column=4, padx=4, pady=4)
+            row=0, column=4, padx=4, pady=3)
 
-        ttk.Label(frm, text="브랜치명:").grid(row=1, column=0, sticky="e", padx=4, pady=4)
+        # 브랜치 / From / To
+        ttk.Label(frm, text="브랜치명:").grid(row=1, column=0, sticky="e", padx=4, pady=3)
         self.branch_var = tk.StringVar(value="dev_main")
         ttk.Entry(frm, textvariable=self.branch_var, width=20).grid(
-            row=1, column=1, sticky="w", padx=4, pady=4)
+            row=1, column=1, sticky="w", padx=4, pady=3)
 
-        ttk.Label(frm, text="From Commit:").grid(row=1, column=2, sticky="e", padx=4, pady=4)
+        ttk.Label(frm, text="From Commit:").grid(row=1, column=2, sticky="e", padx=4, pady=3)
         self.from_var = tk.StringVar()
-        ttk.Entry(frm, textvariable=self.from_var, width=20).grid(
-            row=1, column=3, sticky="w", padx=4, pady=4)
+        ttk.Entry(frm, textvariable=self.from_var, width=22).grid(
+            row=1, column=3, sticky="w", padx=4, pady=3)
 
-        ttk.Label(frm, text="To Commit:").grid(row=2, column=2, sticky="e", padx=4, pady=4)
+        ttk.Label(frm, text="To Commit:").grid(row=2, column=2, sticky="e", padx=4, pady=3)
         self.to_var = tk.StringVar()
-        ttk.Entry(frm, textvariable=self.to_var, width=20).grid(
-            row=2, column=3, sticky="w", padx=4, pady=4)
+        ttk.Entry(frm, textvariable=self.to_var, width=22).grid(
+            row=2, column=3, sticky="w", padx=4, pady=3)
 
         self.run_btn = ttk.Button(frm, text="조회 실행", command=self._run_clicked)
-        self.run_btn.grid(row=2, column=1, padx=4, pady=4, sticky="w")
+        self.run_btn.grid(row=2, column=1, padx=4, pady=3, sticky="w")
 
-        ttk.Label(frm, text="검색 범위:").grid(row=3, column=0, sticky="e", padx=4, pady=4)
+        # 검색 범위 라디오
+        ttk.Label(frm, text="검색 범위:").grid(row=3, column=0, sticky="e", padx=4, pady=3)
         self.scan_mode_var = tk.StringVar(value="full")
         mode_frm = ttk.Frame(frm)
-        mode_frm.grid(row=3, column=1, columnspan=3, sticky="w", padx=4, pady=4)
-        ttk.Radiobutton(mode_frm, text="전체 검색  (A안 - 파일 전체 스캔)",
+        mode_frm.grid(row=3, column=1, columnspan=3, sticky="w", padx=4, pady=3)
+        ttk.Radiobutton(mode_frm, text="전체 검색 (A안 - 파일 전체)",
                         variable=self.scan_mode_var, value="full").pack(side="left", padx=4)
-        ttk.Radiobutton(mode_frm, text="변경점 검색 (B안 - 변경된 부분만)",
+        ttk.Radiobutton(mode_frm, text="변경점 검색 (B안 - 변경분만)",
                         variable=self.scan_mode_var, value="diff").pack(side="left", padx=4)
 
+        # 팩토리 선택 체크박스
+        ttk.Label(frm, text="팩토리 구분:").grid(row=4, column=0, sticky="e", padx=4, pady=3)
+        fac_frm = ttk.Frame(frm)
+        fac_frm.grid(row=4, column=1, columnspan=3, sticky="w", padx=4, pady=3)
+
+        self.use_bonsa_var = tk.BooleanVar(value=True)
+        self.use_wusi_var  = tk.BooleanVar(value=True)
+        bonsa_label = "본사 (" + ", ".join(BONSA_FACTORIES) + ")"
+        wusi_label  = "우시 (" + ", ".join(WUSI_FACTORIES) + ")"
+        ttk.Checkbutton(fac_frm, text=bonsa_label,
+                        variable=self.use_bonsa_var).pack(side="left", padx=8)
+        ttk.Checkbutton(fac_frm, text=wusi_label,
+                        variable=self.use_wusi_var).pack(side="left", padx=8)
+
+        # 상태 표시
         self.status_var = tk.StringVar(value="대기 중")
         ttk.Label(frm, textvariable=self.status_var, foreground="blue").grid(
-            row=4, column=0, columnspan=5, sticky="w", padx=4)
+            row=5, column=0, columnspan=5, sticky="w", padx=4)
 
         for i in range(5):
             frm.columnconfigure(i, weight=1)
 
-    # ---------- 정규식 안내 ----------
+    # ── 정규식 안내 ────────────────────────────────────────
     def _build_regex_info_frame(self):
         frm = ttk.LabelFrame(self.root, text="사용 중인 정규식 (참고용)")
-        frm.pack(fill="x", padx=8, pady=4)
+        frm.pack(fill="x", padx=8, pady=2)
         ttk.Label(frm, text=f"fabUse : {FABUSE_REGEX.pattern}",
                   font=("Consolas", 9)).pack(anchor="w", padx=6)
         ttk.Label(frm, text=f"fabDif : {FABDIF_REGEX.pattern}",
                   font=("Consolas", 9)).pack(anchor="w", padx=6)
 
-    # ---------- 결과 테이블 (신규 / 기등록 분리) ----------
-    def _build_result_tree(self):
-        columns = (["file", "author", "type", "fabuse_value", "fabuse_yn",
-                    "catg_cd", "dif_cd"] + FACTORY_LIST)
+    # ── 결과 테이블 영역 ───────────────────────────────────
+    def _build_tree_area(self):
+        """신규 / 기등록 두 LabelFrame을 담는 컨테이너. 트리는 조회 후 생성."""
+        self.tree_container = ttk.Frame(self.root)
+        self.tree_container.pack(fill="both", expand=True, padx=8, pady=4)
+
+        self._tree_new_frame = ttk.LabelFrame(
+            self.tree_container, text="🔴 신규 등록 필요 (X 포함)")
+        self._tree_new_frame.pack(fill="both", expand=True, pady=4)
+
+        self._tree_exist_frame = ttk.LabelFrame(
+            self.tree_container, text="🟢 기등록 (DB 값 존재)")
+        self._tree_exist_frame.pack(fill="both", expand=True, pady=4)
+
+    def _rebuild_trees(self, active_factories):
+        """조회 실행마다 팩토리 컬럼이 달라지므로 트리를 재생성."""
+        # 기존 위젯 제거
+        for widget in self._tree_new_frame.winfo_children():
+            widget.destroy()
+        for widget in self._tree_exist_frame.winfo_children():
+            widget.destroy()
+
+        columns = (["file", "author", "type",
+                    "fabuse_value", "fabuse_yn",
+                    "catg_cd", "dif_cd"] + active_factories)
         headers = {
             "file":         "파일명",
             "author":       "Merge개발자",
@@ -416,50 +473,66 @@ class App:
             "catg_cd":      "CatgCd",
             "dif_cd":       "DifCd",
         }
-        for f in FACTORY_LIST:
+        for f in active_factories:
             headers[f] = f
 
-        new_frame = ttk.LabelFrame(self.root, text="🔴 신규 등록 필요 (DB에 값 없음 - X 포함)")
-        new_frame.pack(fill="both", expand=True, padx=8, pady=4)
-        self.tree_new = self._make_tree(new_frame, columns, headers)
+        self.tree_new   = self._make_tree(self._tree_new_frame,   columns, headers)
+        self.tree_exist = self._make_tree(self._tree_exist_frame, columns, headers)
         self.tree_new.tag_configure("has_x", background="#ffd6d6")
-
-        exist_frame = ttk.LabelFrame(self.root, text="🟢 기등록 (DB에 값 존재)")
-        exist_frame.pack(fill="both", expand=True, padx=8, pady=4)
-        self.tree_exist = self._make_tree(exist_frame, columns, headers)
 
     def _make_tree(self, parent, columns, headers):
         frm = ttk.Frame(parent)
         frm.pack(fill="both", expand=True)
 
-        tree = ttk.Treeview(frm, columns=columns, show="headings", height=8)
+        tree = ttk.Treeview(frm, columns=columns, show="headings",
+                             height=7, selectmode="extended")
         for col in columns:
             tree.heading(col, text=headers[col])
-            width = 160 if col == "file" else 70
-            tree.column(col, width=width, anchor="center")
+            w = 160 if col == "file" else 80 if col in ("fabuse_value",) else 65
+            tree.column(col, width=w, anchor="center", minwidth=40)
 
         vsb = ttk.Scrollbar(frm, orient="vertical",   command=tree.yview)
         hsb = ttk.Scrollbar(frm, orient="horizontal", command=tree.xview)
         tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
 
         tree.grid(row=0, column=0, sticky="nsew")
-        vsb.grid(row=0,  column=1, sticky="ns")
-        hsb.grid(row=1,  column=0, sticky="ew")
+        vsb.grid(row=0, column=1, sticky="ns")
+        hsb.grid(row=1, column=0, sticky="ew")
         frm.rowconfigure(0, weight=1)
         frm.columnconfigure(0, weight=1)
+
+        # Ctrl+C 복사 바인딩
+        tree.bind("<Control-c>", lambda e: self._copy_selected(tree))
+        # 우클릭 컨텍스트 메뉴
+        menu = tk.Menu(tree, tearoff=0)
+        menu.add_command(label="복사 (Ctrl+C)", command=lambda: self._copy_selected(tree))
+        tree.bind("<Button-3>", lambda e: menu.post(e.x_root, e.y_root))
+
         return tree
 
-    # ---------- 하단 버튼 ----------
+    # ── 하단 버튼 ──────────────────────────────────────────
     def _build_bottom_frame(self):
         frm = ttk.Frame(self.root)
         frm.pack(fill="x", padx=8, pady=6)
-        ttk.Button(frm, text="CSV로 내보내기", command=self._export_csv).pack(side="right")
+        ttk.Button(frm, text="엑셀 내보내기", command=self._export_excel).pack(side="right", padx=4)
 
-    # ---------- 이벤트 핸들러 ----------
+    # ── 이벤트 핸들러 ──────────────────────────────────────
     def _browse_repo(self):
         path = filedialog.askdirectory()
         if path:
             self.repo_path_var.set(path)
+
+    def _copy_selected(self, tree):
+        """선택된 행을 탭 구분으로 클립보드에 복사"""
+        selected = tree.selection()
+        if not selected:
+            return
+        lines = []
+        for item in selected:
+            vals = tree.item(item, "values")
+            lines.append("\t".join(str(v) for v in vals))
+        self.root.clipboard_clear()
+        self.root.clipboard_append("\n".join(lines))
 
     def _run_clicked(self):
         repo_path   = self.repo_path_var.get().strip()
@@ -471,79 +544,62 @@ class App:
             messagebox.showwarning("입력 확인", "모든 입력값을 채워주세요.")
             return
 
+        use_bonsa = self.use_bonsa_var.get()
+        use_wusi  = self.use_wusi_var.get()
+        if not use_bonsa and not use_wusi:
+            messagebox.showwarning("입력 확인", "본사 / 우시 중 하나 이상 선택해주세요.")
+            return
+
         self.run_btn.config(state="disabled")
-        self.tree_new.delete(*self.tree_new.get_children())
-        self.tree_exist.delete(*self.tree_exist.get_children())
+        self.status_var.set("분석 시작...")
         self.rows_data = []
 
         t = threading.Thread(
             target=self._run_analysis_thread,
-            args=(repo_path, branch, from_commit, to_commit, self.scan_mode_var.get()),
+            args=(repo_path, branch, from_commit, to_commit,
+                  self.scan_mode_var.get(), use_bonsa, use_wusi),
             daemon=True,
         )
         t.start()
 
-    def _run_analysis_thread(self, repo_path, branch, from_commit, to_commit, scan_mode):
-    try:
-        def progress_cb(idx, total, filepath):
-            self.status_var.set(f"분석 중... ({idx}/{total}) {filepath}")
+    def _run_analysis_thread(self, repo_path, branch, from_commit, to_commit,
+                              scan_mode, use_bonsa, use_wusi):
+        try:
+            def progress_cb(idx, total, filepath):
+                self.status_var.set(f"분석 중... ({idx}/{total}) {filepath}")
 
-        # 디버그 1: 파일 목록
-        repo, files = get_changed_files(repo_path, branch, from_commit, to_commit)
-        msg1 = f"변경 파일 {len(files)}개:\n" + "\n".join(files) if files else "변경 파일 없음"
-        self.root.after(0, lambda: messagebox.showinfo("DEBUG 1 - 파일목록", msg1))
-        if not files:
-            return
+            rows, active_factories = analyze(
+                repo_path, branch, from_commit, to_commit,
+                scan_mode, use_bonsa, use_wusi, progress_cb
+            )
+            self.root.after(0, self._populate_results, rows, active_factories)
+        except Exception as e:
+            err_msg = str(e)
+            self.root.after(0, lambda: messagebox.showerror("오류", err_msg))
+        finally:
+            self.root.after(0, lambda: self.run_btn.config(state="normal"))
 
-        # 디버그 2: 첫 번째 파일 내용 + 정규식 매칭
-        first_file = files[0]
-        if scan_mode == "diff":
-            content = get_changed_content(repo, from_commit, to_commit, first_file)
-        else:
-            content = get_file_content_at_commit(repo, to_commit, first_file)
+    def _populate_results(self, rows, active_factories):
+        self.rows_data        = rows
+        self.active_factories = active_factories
 
-        fabuse = extract_fabuse_calls(content)
-        fabdif = extract_fabdif_calls(content, first_file)
+        # 팩토리 컬럼이 바뀔 수 있으므로 트리 재생성
+        self._rebuild_trees(active_factories)
 
-        # 내용 앞 300자만 미리보기
-        preview = (content[:300] + "...") if content and len(content) > 300 else (content or "None")
-        msg2 = (f"파일: {first_file}\n"
-                f"content 길이: {len(content) if content else 0}\n\n"
-                f"[내용 미리보기]\n{preview}\n\n"
-                f"fabUse 매칭: {fabuse}\n"
-                f"fabDif 매칭: {fabdif}")
-        self.root.after(0, lambda: messagebox.showinfo("DEBUG 2 - 정규식", msg2))
-
-        rows = analyze(repo_path, branch, from_commit, to_commit, scan_mode, progress_cb)
-
-        # 디버그 3: rows 결과
-        msg3 = f"rows 총 {len(rows)}건\n\n" + "\n".join(str(r) for r in rows[:3])
-        self.root.after(0, lambda: messagebox.showinfo("DEBUG 3 - rows", msg3))
-
-        self.root.after(0, self._populate_results, rows)
-
-    except Exception as e:
-        err_msg = str(e)
-        self.root.after(0, lambda: messagebox.showerror("오류", err_msg))
-    finally:
-        self.root.after(0, lambda: self.run_btn.config(state="normal"))
-    def _populate_results(self, rows):
-        self.rows_data = rows
-        new_count   = 0
-        exist_count = 0
+        new_count = exist_count = 0
 
         for r in rows:
             if r["call_type"] == "fabUse":
                 values = ([r["file"], r["author"], "fabUse",
                            r["fabuse_value"], r["fabuse_yn"], "", ""]
-                          + [""] * len(FACTORY_LIST))
+                          + [""] * len(active_factories))
                 has_x = r["fabuse_yn"] == "X"
             else:
-                factory_vals = [r["factory_results"].get(f, "X") for f in FACTORY_LIST]
+                fvals  = [r["factory_results"].get(f, "X") for f in active_factories]
                 values = ([r["file"], r["author"], "fabDif",
                            "", "", r["catg_cd"], r["dif_cd"]]
-                          + factory_vals)
-                has_x = "X" in factory_vals
+                          + fvals)
+                has_x = "X" in fvals
 
             if has_x:
                 self.tree_new.insert("", "end", values=values, tags=("has_x",))
@@ -552,39 +608,90 @@ class App:
                 self.tree_exist.insert("", "end", values=values)
                 exist_count += 1
 
-        self.status_var.set(f"완료.  신규 등록 필요 {new_count}건  /  기등록 {exist_count}건")
+        self.status_var.set(
+            f"완료.  신규 등록 필요 {new_count}건  /  기등록 {exist_count}건"
+        )
 
-    def _export_csv(self):
+    # ── 엑셀 내보내기 ──────────────────────────────────────
+    def _export_excel(self):
         if not self.rows_data:
             messagebox.showinfo("안내", "내보낼 데이터가 없습니다.")
             return
+
         path = filedialog.asksaveasfilename(
-            defaultextension=".csv", filetypes=[("CSV", "*.csv")])
+            defaultextension=".xlsx",
+            filetypes=[("Excel", "*.xlsx")],
+        )
         if not path:
             return
 
-        header = (["구분(신규/기등록)", "파일명", "Merge개발자", "호출타입",
-                   "FabUseVal", "FabUseYn", "CatgCd", "DifCd"] + FACTORY_LIST)
-        with open(path, "w", newline="", encoding="utf-8-sig") as f:
-            writer = csv.writer(f)
-            writer.writerow(header)
-            for r in self.rows_data:
+        wb = openpyxl.Workbook()
+        wb.remove(wb.active)  # 기본 시트 제거
+
+        header = (["구분", "파일명", "Merge개발자", "호출타입",
+                   "FabUseVal", "FabUseYn", "CatgCd", "DifCd"]
+                  + self.active_factories)
+
+        fill_red    = PatternFill("solid", fgColor="FFD6D6")
+        fill_header = PatternFill("solid", fgColor="4472C4")
+        font_header = Font(bold=True, color="FFFFFF")
+        font_x      = Font(bold=True, color="CC0000")
+        center      = Alignment(horizontal="center", vertical="center")
+
+        for sheet_name, rows_subset in [
+            ("신규등록필요", [r for r in self.rows_data if self._is_new(r)]),
+            ("기등록",       [r for r in self.rows_data if not self._is_new(r)]),
+        ]:
+            ws = wb.create_sheet(sheet_name)
+
+            # 헤더
+            for col_idx, h in enumerate(header, 1):
+                cell = ws.cell(row=1, column=col_idx, value=h)
+                cell.fill      = fill_header
+                cell.font      = font_header
+                cell.alignment = center
+
+            # 데이터
+            for row_idx, r in enumerate(rows_subset, 2):
                 if r["call_type"] == "fabUse":
-                    row_body = ([r["file"], r["author"], "fabUse",
+                    fvals    = [""] * len(self.active_factories)
+                    is_new   = r["fabuse_yn"] == "X"
+                    row_data = (["신규" if is_new else "기등록",
+                                 r["file"], r["author"], "fabUse",
                                  r["fabuse_value"], r["fabuse_yn"], "", ""]
-                                + [""] * len(FACTORY_LIST))
-                    has_x = r["fabuse_yn"] == "X"
+                                + fvals)
                 else:
-                    factory_vals = [r["factory_results"].get(f, "X") for f in FACTORY_LIST]
-                    row_body = ([r["file"], r["author"], "fabDif",
+                    fvals    = [r["factory_results"].get(f, "X") for f in self.active_factories]
+                    is_new   = "X" in fvals
+                    row_data = (["신규" if is_new else "기등록",
+                                 r["file"], r["author"], "fabDif",
                                  "", "", r["catg_cd"], r["dif_cd"]]
-                                + factory_vals)
-                    has_x = "X" in factory_vals
-                writer.writerow(["신규" if has_x else "기등록"] + row_body)
+                                + fvals)
 
-        messagebox.showinfo("완료", f"CSV 저장 완료:\n{path}")
+                for col_idx, val in enumerate(row_data, 1):
+                    cell = ws.cell(row=row_idx, column=col_idx, value=val)
+                    cell.alignment = center
+                    if val == "X":
+                        cell.fill = fill_red
+                        cell.font = font_x
+
+            # 열 너비 자동 조정
+            for col in ws.columns:
+                max_len = max((len(str(c.value or "")) for c in col), default=0)
+                ws.column_dimensions[col[0].column_letter].width = min(max_len + 4, 40)
+
+        wb.save(path)
+        messagebox.showinfo("완료", f"엑셀 저장 완료:\n{path}")
+
+    def _is_new(self, r):
+        if r["call_type"] == "fabUse":
+            return r["fabuse_yn"] == "X"
+        return "X" in [r["factory_results"].get(f, "X") for f in self.active_factories]
 
 
+# =========================================================
+# 10. 실행
+# =========================================================
 if __name__ == "__main__":
     root = tk.Tk()
     app = App(root)
