@@ -618,17 +618,20 @@ def _build_regex_info_frame(self):
         self.status_var.set(f"{len(lines)}행 복사됨 (줄바꿈 구분)")
 
     # ── 팩토리 컬럼 숨김/표시 ──────────────────────────────
-    def _on_factory_toggle(self):
-        use_bonsa = self.use_bonsa_var.get()
-        use_wusi  = self.use_wusi_var.get()
-        for tree in (self.tree_new, self.tree_exist):
-            for f in BONSA_FACTORIES:
-                w = COL_WIDTH["factory"] if use_bonsa else 0
-                tree.column(f, width=w, minwidth=0)
-            for f in WUSI_FACTORIES:
-                w = COL_WIDTH["factory"] if use_wusi else 0
-                tree.column(f, width=w, minwidth=0)
-
+def _on_factory_toggle(self):
+    use_bonsa = self.use_bonsa_var.get()
+    use_wusi  = self.use_wusi_var.get()
+    for tree in (self.tree_new, self.tree_exist):
+        for f in BONSA_FACTORIES:
+            if use_bonsa:
+                tree.column(f, width=COL_WIDTH["factory"], minwidth=COL_WIDTH["factory"])
+            else:
+                tree.column(f, width=0, minwidth=0)
+        for f in WUSI_FACTORIES:
+            if use_wusi:
+                tree.column(f, width=COL_WIDTH["factory"], minwidth=COL_WIDTH["factory"])
+            else:
+                tree.column(f, width=0, minwidth=0)
     # ── 하단 버튼 ──────────────────────────────────────────
     def _build_bottom_frame(self):
         frm = ttk.Frame(self.root)
