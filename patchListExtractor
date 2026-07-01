@@ -69,12 +69,21 @@ COL_WIDTH = {
 # =========================================================
 # 2. 정규표현식
 # =========================================================
-FABUSE_REGEX = re.compile(
-    r"getFabUseYn\s*\(\s*(?:[^\")\s][^,]*,\s*)?\"([^\"]+)\"",
+# getFabOrientedUseYn - Java: ("catgCd", "difCd", factory) → 1, 2번째
+FABDIF_JAVA_REGEX = re.compile(
+    r"getFabOrientedUseYn\s*\(\s*\"([^\"]+)\"\s*,\s*\"([^\"]+)\"\s*,\s*[^)]+\)",
     re.IGNORECASE,
 )
-FABDIF_REGEX = re.compile(
-    r"getFabOrientedUseYn\s*\(\s*\"([^\"]+)\"\s*,\s*\"([^\"]+)\"\s*,\s*[^)]+\)",
+
+# getFabOrientedUseYn - C#: (factory, "catgCd", "difCd") → 2, 3번째
+FABDIF_CS_REGEX = re.compile(
+    r"getFabOrientedUseYn\s*\(\s*[^\")\s][^,]*,\s*\"([^\"]+)\"\s*,\s*\"([^\"]+)\"\s*\)",
+    re.IGNORECASE,
+)
+
+# getFabOrientedList - 언어 무관: ("catgCd", "difCd", ...) → 1, 2번째
+FABDIF_LIST_REGEX = re.compile(
+    r"getFabOrientedList\s*\(\s*\"([^\"]+)\"\s*,\s*\"([^\"]+)\"",
     re.IGNORECASE,
 )
 
@@ -231,8 +240,19 @@ def extract_fabuse_calls(content):
 def extract_fabdif_calls(content, filepath):
     if not content:
         return []
-    return [(m.group(1), m.group(2)) for m in FABDIF_REGEX.finditer(content)]
+    results = []
+    is_cs = filepath.lower().endswith(".cs")
 
+    # getFabOrientedUseYn - 언어별 인자 순서 분기
+    regex = FABDIF_CS_REGEX if is_cs else FABDIF_JAVA_REGEX
+    for m in regex.finditer(content):
+        results.append((m.group(1), m.group(2)))
+
+    # getFabOrientedList - 언어 무관 1, 2번째
+    for m in FABDIF_LIST_REGEX.finditer(content):
+        results.append((m.group(1), m.group(2)))
+
+    return results
 
 # =========================================================
 # 7. DB 조회
@@ -460,14 +480,17 @@ class App:
             frm.columnconfigure(i, weight=1)
 
     # ── 정규식 안내 ────────────────────────────────────────
-    def _build_regex_info_frame(self):
-        frm = ttk.LabelFrame(self.root, text="사용 중인 정규식 (참고용)")
-        frm.pack(fill="x", padx=8, pady=2)
-        ttk.Label(frm, text=f"fabUse : {FABUSE_REGEX.pattern}",
-                  font=("Consolas", 9)).pack(anchor="w", padx=6)
-        ttk.Label(frm, text=f"fabDif : {FABDIF_REGEX.pattern}",
-                  font=("Consolas", 9)).pack(anchor="w", padx=6)
-
+def _build_regex_info_frame(self):
+    frm = ttk.LabelFrame(self.root, text="사용 중인 정규식 (참고용)")
+    frm.pack(fill="x", padx=8, pady=2)
+    ttk.Label(frm, text=f"fabUse     : {FABUSE_REGEX.pattern}",
+              font=("Consolas", 9)).pack(anchor="w", padx=6)
+    ttk.Label(frm, text=f"fabDif(java): {FABDIF_JAVA_REGEX.pattern}",
+              font=("Consolas", 9)).pack(anchor="w", padx=6)
+    ttk.Label(frm, text=f"fabDif(cs)  : {FABDIF_CS_REGEX.pattern}",
+              font=("Consolas", 9)).pack(anchor="w", padx=6)
+    ttk.Label(frm, text=f"fabDifList  : {FABDIF_LIST_REGEX.pattern}",
+              font=("Consolas", 9)).pack(anchor="w", padx=6)
     # ── 결과 트리 ──────────────────────────────────────────
     def _build_trees(self):
         self._columns = (["file", "author", "type",
