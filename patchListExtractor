@@ -479,18 +479,49 @@ class App:
         t.start()
 
     def _run_analysis_thread(self, repo_path, branch, from_commit, to_commit, scan_mode):
-        try:
-            def progress_cb(idx, total, filepath):
-                self.status_var.set(f"분석 중... ({idx}/{total}) {filepath}")
+    try:
+        def progress_cb(idx, total, filepath):
+            self.status_var.set(f"분석 중... ({idx}/{total}) {filepath}")
 
-            rows = analyze(repo_path, branch, from_commit, to_commit, scan_mode, progress_cb)
-            self.root.after(0, self._populate_results, rows)
-        except Exception as e:
-            err_msg = str(e)
-            self.root.after(0, lambda: messagebox.showerror("오류", err_msg))
-        finally:
-            self.root.after(0, lambda: self.run_btn.config(state="normal"))
+        # 디버그 1: 파일 목록
+        repo, files = get_changed_files(repo_path, branch, from_commit, to_commit)
+        msg1 = f"변경 파일 {len(files)}개:\n" + "\n".join(files) if files else "변경 파일 없음"
+        self.root.after(0, lambda: messagebox.showinfo("DEBUG 1 - 파일목록", msg1))
+        if not files:
+            return
 
+        # 디버그 2: 첫 번째 파일 내용 + 정규식 매칭
+        first_file = files[0]
+        if scan_mode == "diff":
+            content = get_changed_content(repo, from_commit, to_commit, first_file)
+        else:
+            content = get_file_content_at_commit(repo, to_commit, first_file)
+
+        fabuse = extract_fabuse_calls(content)
+        fabdif = extract_fabdif_calls(content, first_file)
+
+        # 내용 앞 300자만 미리보기
+        preview = (content[:300] + "...") if content and len(content) > 300 else (content or "None")
+        msg2 = (f"파일: {first_file}\n"
+                f"content 길이: {len(content) if content else 0}\n\n"
+                f"[내용 미리보기]\n{preview}\n\n"
+                f"fabUse 매칭: {fabuse}\n"
+                f"fabDif 매칭: {fabdif}")
+        self.root.after(0, lambda: messagebox.showinfo("DEBUG 2 - 정규식", msg2))
+
+        rows = analyze(repo_path, branch, from_commit, to_commit, scan_mode, progress_cb)
+
+        # 디버그 3: rows 결과
+        msg3 = f"rows 총 {len(rows)}건\n\n" + "\n".join(str(r) for r in rows[:3])
+        self.root.after(0, lambda: messagebox.showinfo("DEBUG 3 - rows", msg3))
+
+        self.root.after(0, self._populate_results, rows)
+
+    except Exception as e:
+        err_msg = str(e)
+        self.root.after(0, lambda: messagebox.showerror("오류", err_msg))
+    finally:
+        self.root.after(0, lambda: self.run_btn.config(state="normal"))
     def _populate_results(self, rows):
         self.rows_data = rows
         new_count   = 0
