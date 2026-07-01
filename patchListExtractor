@@ -58,8 +58,9 @@ DIFF_CONTEXT_LINES = 10
 # 2. 정규표현식
 # =========================================================
 # getFabUseYn(어떤변수, "추출값")  →  2번째 인자(따옴표 안)만 캡처
+# 수정 후
 FABUSE_REGEX = re.compile(
-    r"getFabUseYn\s*\(\s*[^,]+,\s*\"([^\"]+)\"\s*\)"
+    r"getFabUseYn\s*\(\s*\"([^\"]+)\"\s*\)"
 )
 
 # getFabOriented / selectFabOriented ("catgCd", "difCd", factory)
@@ -68,6 +69,10 @@ FABUSE_REGEX = re.compile(
 FABDIF_REGEX = re.compile(
     r"(?:getFabOriented|selectFabOriented)\s*\(\s*\"([^\"]+)\"\s*,\s*\"([^\"]+)\"\s*,\s*[^)]+\)"
 )
+FABDIF_REGEX = re.compile(
+    r"getFabOrientedUseYn\s*\(\s*\"([^\"]+)\"\s*,\s*\"([^\"]+)\"\s*,\s*[^)]+\)"
+)
+
 
 
 # =========================================================
