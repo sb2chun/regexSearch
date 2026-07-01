@@ -724,6 +724,35 @@ class App:
             f"조회 중...  신규 {self._new_count}건  /  기등록 {self._exist_count}건"
         )
 
+
+# 헤더 클릭 → 해당 컬럼 전체 값 복사
+def on_header_click(col, t=tree):
+    values = []
+    for item in t.get_children():
+        vals = t.item(item, "values")
+        col_idx = columns.index(col)
+        if vals and col_idx < len(vals):
+            v = str(vals[col_idx])
+            if v:  # 빈 값 제외
+                values.append(v)
+        # 자식 행도 포함
+        for child in t.get_children(item):
+            vals = t.item(child, "values")
+            if vals and col_idx < len(vals):
+                v = str(vals[col_idx])
+                if v:
+                    values.append(v)
+
+    if values:
+        result = "\n".join(values)
+        self.root.clipboard_clear()
+        self.root.clipboard_append(result)
+        self.status_var.set(f"[{headers[col]}] {len(values)}개 복사됨")
+
+for col in columns:
+    tree.heading(col, text=headers[col],
+                 command=lambda c=col: on_header_click(c, tree))
+
     def _on_analysis_done(self):
         stopped = self._stop_event.is_set()
         prefix  = "중지됨." if stopped else "완료."
