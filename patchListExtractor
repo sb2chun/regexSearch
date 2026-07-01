@@ -47,10 +47,9 @@ DB_CONFIG_WUSI = {
     ],
 }
 
-BONSA_FACTORIES = ["M10", "M11", "M12", "M13", "M14", "M16"]
-WUSI_FACTORIES  = ["C2"]
-ALL_FACTORIES   = BONSA_FACTORIES + WUSI_FACTORIES
-
+BONSA_FACTORIES      = ["M10", "M11", "M12", "M13", "M14", "M16"]
+WUSI_FACTORIES       = ["C2"]
+ALL_FACTORIES        = BONSA_FACTORIES + WUSI_FACTORIES
 TARGET_EXTENSIONS    = (".java", ".cs")
 EXCLUDE_FILE_PATTERNS = [".designer.cs"]
 DIFF_CONTEXT_LINES   = 10
@@ -475,24 +474,28 @@ class App:
                            "fabuse_value", "fabuse_yn",
                            "catg_cd", "dif_cd"] + ALL_FACTORIES)
         self._headers = {
-            "file":         "파일명 (헤더클릭=복사)",
+            "file":         "파일명",
             "author":       "Merge개발자",
             "type":         "구분",
-            "fabuse_value": "FabUseVal (헤더클릭=복사)",
+            "fabuse_value": "FabUseVal",
             "fabuse_yn":    "FabUseYn",
-            "catg_cd":      "CatgCd (헤더클릭=복사)",
-            "dif_cd":       "DifCd (헤더클릭=복사)",
+            "catg_cd":      "CatgCd",
+            "dif_cd":       "DifCd",
         }
         for f in ALL_FACTORIES:
             self._headers[f] = f
 
-        new_frame = ttk.LabelFrame(self.root, text="🔴 신규 등록 필요 (X 포함)  ※ 컬럼 헤더 클릭 시 해당 컬럼 전체 값 복사")
+        new_frame = ttk.LabelFrame(
+            self.root,
+            text="🔴 신규 등록 필요 (X 포함)  ※ 헤더클릭=컬럼복사(중복제거)  /  행선택후 우클릭=행복사")
         new_frame.pack(fill="both", expand=True, padx=8, pady=3)
         self.tree_new = self._make_tree(new_frame)
         self.tree_new.tag_configure("has_x", background="#ffd6d6")
         self.tree_new.tag_configure("child", background="#fff0f0", foreground="#999999")
 
-        exist_frame = ttk.LabelFrame(self.root, text="🟢 기등록 (DB 값 존재)  ※ 컬럼 헤더 클릭 시 해당 컬럼 전체 값 복사")
+        exist_frame = ttk.LabelFrame(
+            self.root,
+            text="🟢 기등록 (DB 값 존재)  ※ 헤더클릭=컬럼복사(중복제거)  /  행선택후 우클릭=행복사")
         exist_frame.pack(fill="both", expand=True, padx=8, pady=3)
         self.tree_exist = self._make_tree(exist_frame)
         self.tree_exist.tag_configure("child", background="#f5f5f5", foreground="#999999")
@@ -501,7 +504,7 @@ class App:
         columns = self._columns
         headers = self._headers
 
-        frm  = ttk.Frame(parent)
+        frm = ttk.Frame(parent)
         frm.pack(fill="both", expand=True)
 
         tree = ttk.Treeview(frm, columns=columns,
@@ -513,13 +516,9 @@ class App:
         tree.heading("#0", text="")
 
         for col in columns:
-            # 헤더 클릭 → 해당 컬럼 전체 값 복사
             tree.heading(col, text=headers[col],
                          command=lambda c=col, t=tree: self._copy_column(c, t))
-            if col in ALL_FACTORIES:
-                w = COL_WIDTH["factory"]
-            else:
-                w = COL_WIDTH.get(col, 80)
+            w = COL_WIDTH["factory"] if col in ALL_FACTORIES else COL_WIDTH.get(col, 80)
             tree.column(col, width=w, minwidth=0, anchor="center")
 
         vsb = ttk.Scrollbar(frm, orient="vertical",   command=tree.yview)
@@ -532,41 +531,68 @@ class App:
         frm.rowconfigure(0, weight=1)
         frm.columnconfigure(0, weight=1)
 
-        # 행 선택 후 Ctrl+C → 선택 행 복사
+        # 우클릭 컨텍스트 메뉴
+        menu = tk.Menu(tree, tearoff=0)
+        menu.add_command(label="선택 행 복사 (탭 구분 - 엑셀 붙여넣기용)",
+                         command=lambda t=tree: self._copy_selected(t))
+        menu.add_command(label="선택 행 복사 (줄바꿈 구분)",
+                         command=lambda t=tree: self._copy_selected_newline(t))
+        tree.bind("<Button-3>", lambda e, m=menu: m.post(e.x_root, e.y_root))
+
+        # Ctrl+C → 선택 행 복사 (탭 구분)
         tree.bind("<Control-c>", lambda e, t=tree: self._copy_selected(t))
 
         return tree
 
-    # ── 컬럼 전체 복사 ─────────────────────────────────────
+    # ── 컬럼 전체 복사 (부모행만 = 중복 제거된 값) ──────────
     def _copy_column(self, col, tree):
         col_idx = self._columns.index(col)
+        seen    = set()
         values  = []
+        # 부모 행만 순회 (자식 행 제외 → 중복 제거 효과)
         for item in tree.get_children():
             vals = tree.item(item, "values")
-            if vals and col_idx < len(vals) and vals[col_idx]:
-                values.append(str(vals[col_idx]))
-            for child in tree.get_children(item):
-                vals = tree.item(child, "values")
-                if vals and col_idx < len(vals) and vals[col_idx]:
-                    values.append(str(vals[col_idx]))
+            if not vals or col_idx >= len(vals):
+                continue
+            val = str(vals[col_idx]).strip()
+            # "(+N)" 붙은 파일명이면 파일명 부분만 추출
+            if col == "file" and "(+" in val:
+                val = val[:val.rfind("  (+")].strip()
+            if val and val not in seen:
+                seen.add(val)
+                values.append(val)
+
         if values:
             self.root.clipboard_clear()
             self.root.clipboard_append("\n".join(values))
-            col_name = self._headers.get(col, col).replace(" (헤더클릭=복사)", "")
-            self.status_var.set(f"[{col_name}] {len(values)}개 복사됨")
+            col_name = self._headers.get(col, col)
+            self.status_var.set(f"[{col_name}] {len(values)}개 복사됨 (중복제거)")
         else:
             self.status_var.set("복사할 값이 없습니다.")
 
-    # ── 선택 행 복사 ───────────────────────────────────────
+    # ── 선택 행 복사 (탭 구분 - 엑셀 붙여넣기용) ───────────
     def _copy_selected(self, tree):
         selected = tree.selection()
         if not selected:
+            self.status_var.set("복사할 행을 선택해주세요.")
             return
         lines = ["\t".join(str(v) for v in tree.item(i, "values"))
                  for i in selected]
         self.root.clipboard_clear()
         self.root.clipboard_append("\n".join(lines))
-        self.status_var.set(f"{len(lines)}행 복사됨")
+        self.status_var.set(f"{len(lines)}행 복사됨 (탭 구분)")
+
+    # ── 선택 행 복사 (줄바꿈 구분) ─────────────────────────
+    def _copy_selected_newline(self, tree):
+        selected = tree.selection()
+        if not selected:
+            self.status_var.set("복사할 행을 선택해주세요.")
+            return
+        lines = ["\t".join(str(v) for v in tree.item(i, "values"))
+                 for i in selected]
+        self.root.clipboard_clear()
+        self.root.clipboard_append("\n".join(lines))
+        self.status_var.set(f"{len(lines)}행 복사됨 (줄바꿈 구분)")
 
     # ── 팩토리 컬럼 숨김/표시 ──────────────────────────────
     def _on_factory_toggle(self):
@@ -666,8 +692,8 @@ class App:
         files  = row["files"]
 
         if row["call_type"] == "fabUse":
-            has_x     = row["fabuse_yn"] == "X"
-            fac_vals  = [""] * len(ALL_FACTORIES)
+            has_x    = row["fabuse_yn"] == "X"
+            fac_vals = [""] * len(ALL_FACTORIES)
             def make_values(fp, auth):
                 return ([fp, auth, "fabUse",
                          row["fabuse_value"], row["fabuse_yn"], "", ""]
@@ -697,7 +723,6 @@ class App:
                                 values=make_values(display_file, first_author),
                                 tags=tag,
                                 open=False)
-
         for fp, auth in files[1:]:
             tree.insert(parent_id, "end",
                         values=make_values(fp, auth),
@@ -716,8 +741,7 @@ class App:
         stopped = self._stop_event.is_set()
         prefix  = "중지됨." if stopped else "완료."
         self.status_var.set(
-            f"{prefix}  신규 등록 필요 {self._new_count}건  "
-            f"/  기등록 {self._exist_count}건"
+            f"{prefix}  신규 등록 필요 {self._new_count}건  /  기등록 {self._exist_count}건"
         )
 
     # ── 엑셀 내보내기 ──────────────────────────────────────
