@@ -110,31 +110,25 @@ def _find_oracle_client_lib():
     return None
 
 
+# tnsnames.ora 고정 경로 복원
 def _init_oracle_client():
     global _oracle_client_initialized
     if _oracle_client_initialized:
         return
     lib_dir = _find_oracle_client_lib()
     if lib_dir:
-        oracledb.init_oracle_client(lib_dir=lib_dir)
+        oracledb.init_oracle_client(lib_dir=lib_dir, config_dir=TNS_CONFIG_DIR)
     else:
-        oracledb.init_oracle_client()
+        oracledb.init_oracle_client(config_dir=TNS_CONFIG_DIR)
     _oracle_client_initialized = True
-
 
 def get_connection(db_config):
     _init_oracle_client()
-    dsn = oracledb.makedsn(
-        db_config["host"],
-        db_config["port"],
-        sid=db_config["service"],
-    )
     return oracledb.connect(
         user=db_config["user"],
         password=db_config["password"],
-        dsn=dsn,
+        dsn=db_config["dsn"],   # TNS명 그대로
     )
-
 
 # =========================================================
 # 5. Git 관련 함수
