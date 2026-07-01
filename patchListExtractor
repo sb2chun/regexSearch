@@ -51,8 +51,9 @@ BONSA_FACTORIES = ["M10", "M11", "M12", "M13", "M14", "M16"]
 WUSI_FACTORIES  = ["C2"]
 ALL_FACTORIES   = BONSA_FACTORIES + WUSI_FACTORIES
 
-TARGET_EXTENSIONS  = (".java", ".cs")
-DIFF_CONTEXT_LINES = 10
+TARGET_EXTENSIONS    = (".java", ".cs")
+EXCLUDE_FILE_PATTERNS = [".designer.cs"]
+DIFF_CONTEXT_LINES   = 10
 
 COL_WIDTH = {
     "file":         200,
@@ -69,12 +70,10 @@ COL_WIDTH = {
 # =========================================================
 # 2. 정규표현식
 # =========================================================
-# Java: 첫 번째 인자가 따옴표 / C#: 두 번째 인자가 따옴표
 FABUSE_REGEX = re.compile(
     r"getFabUseYn\s*\(\s*(?:[^\")\s][^,]*,\s*)?\"([^\"]+)\"",
     re.IGNORECASE,
 )
-
 FABDIF_REGEX = re.compile(
     r"getFabOrientedUseYn\s*\(\s*\"([^\"]+)\"\s*,\s*\"([^\"]+)\"\s*,\s*[^)]+\)",
     re.IGNORECASE,
@@ -172,6 +171,10 @@ def get_changed_files(repo_path, branch, from_commit, to_commit):
     diff_index = repo.git.diff("--name-only", diff_range)
     files = [f for f in diff_index.splitlines() if f.strip()]
     files = [f for f in files if f.lower().endswith(TARGET_EXTENSIONS)]
+    files = [
+        f for f in files
+        if not any(f.lower().endswith(pat) for pat in EXCLUDE_FILE_PATTERNS)
+    ]
     return repo, files
 
 
@@ -263,11 +266,6 @@ def query_fabdif(conns, catg_cd, dif_cd, active_factories):
 def analyze(repo_path, branch, from_commit, to_commit,
             scan_mode, use_bonsa, use_wusi,
             row_cb=None, progress_cb=None, stop_event=None):
-    """
-    1단계: 전체 파일을 순회하며 fabUse/fabDif 키별로 파일 목록 수집
-    2단계: 키별로 DB 1회 조회 후 row_cb 호출 (파일 목록 포함)
-    row dict의 'files': [(filepath, author), ...] 로 중복 파일 정보 전달
-    """
     repo, files = get_changed_files(repo_path, branch, from_commit, to_commit)
 
     active_factories = []
@@ -285,8 +283,8 @@ def analyze(repo_path, branch, from_commit, to_commit,
     fabuse_conn = conns.get("bonsa") or conns.get("wusi")
 
     # 1단계: 파일 순회 → 키별 파일 목록 수집
-    seen_fabuse = {}   # value -> [(filepath, author), ...]
-    seen_fabdif = {}   # (catg, dif) -> [(filepath, author), ...]
+    seen_fabuse = {}
+    seen_fabdif = {}
     total = len(files)
 
     for idx, filepath in enumerate(files):
@@ -309,14 +307,13 @@ def analyze(repo_path, branch, from_commit, to_commit,
 
         for value in fabuse_calls:
             seen_fabuse.setdefault(value, []).append((filepath, author))
-
         for catg_cd, dif_cd in fabdif_calls:
             seen_fabdif.setdefault((catg_cd, dif_cd), []).append((filepath, author))
 
     # 2단계: 키별 DB 조회 → row_cb 호출
-    rows      = []
-    total_db  = len(seen_fabuse) + len(seen_fabdif)
-    db_idx    = 0
+    rows     = []
+    total_db = len(seen_fabuse) + len(seen_fabdif)
+    db_idx   = 0
 
     for value, file_list in seen_fabuse.items():
         if stop_event and stop_event.is_set():
@@ -327,13 +324,13 @@ def analyze(repo_path, branch, from_commit, to_commit,
 
         yn  = query_fabuse(fabuse_conn, value) if fabuse_conn else "X"
         row = {
-            "call_type":       "fabUse",
-            "fabuse_value":    value,
-            "fabuse_yn":       yn,
-            "catg_cd":         "",
-            "dif_cd":          "",
-            "factory_results": {},
-            "files":           file_list,        # [(filepath, author), ...]
+            "call_type":        "fabUse",
+            "fabuse_value":     value,
+            "fabuse_yn":        yn,
+            "catg_cd":          "",
+            "dif_cd":           "",
+            "factory_results":  {},
+            "files":            file_list,
             "active_factories": active_factories,
         }
         rows.append(row)
@@ -349,13 +346,13 @@ def analyze(repo_path, branch, from_commit, to_commit,
 
         factory_results = query_fabdif(conns, catg_cd, dif_cd, active_factories)
         row = {
-            "call_type":       "fabDif",
-            "fabuse_value":    "",
-            "fabuse_yn":       "",
-            "catg_cd":         catg_cd,
-            "dif_cd":          dif_cd,
-            "factory_results": factory_results,
-            "files":           file_list,
+            "call_type":        "fabDif",
+            "fabuse_value":     "",
+            "fabuse_yn":        "",
+            "catg_cd":          catg_cd,
+            "dif_cd":           dif_cd,
+            "factory_results":  factory_results,
+            "files":            file_list,
             "active_factories": active_factories,
         }
         rows.append(row)
@@ -380,12 +377,11 @@ class App:
         root.title("FabUseYn / FabDif 커밋 범위 조회 도구")
         root.geometry("1420x800")
 
-        self.rows_data         = []
-        self.active_factories  = list(ALL_FACTORIES)
-        self._new_count        = 0
-        self._exist_count      = 0
-        self._stop_event       = threading.Event()
-        self._last_cell_value  = None   # 셀 단위 복사용
+        self.rows_data        = []
+        self.active_factories = list(ALL_FACTORIES)
+        self._new_count       = 0
+        self._exist_count     = 0
+        self._stop_event      = threading.Event()
 
         self._build_input_frame()
         self._build_regex_info_frame()
@@ -402,8 +398,8 @@ class App:
         self.repo_path_var = tk.StringVar(value=GIT_REPO_PATH_DEFAULT)
         ttk.Entry(frm, textvariable=self.repo_path_var, width=55).grid(
             row=0, column=1, columnspan=3, sticky="we", padx=4, pady=3)
-        ttk.Button(frm, text="찾아보기", command=self._browse_repo).grid(
-            row=0, column=4, padx=4, pady=3)
+        ttk.Button(frm, text="찾아보기",
+                   command=self._browse_repo).grid(row=0, column=4, padx=4, pady=3)
 
         ttk.Label(frm, text="브랜치명:").grid(
             row=1, column=0, sticky="e", padx=4, pady=3)
@@ -458,9 +454,9 @@ class App:
                         command=self._on_factory_toggle).pack(side="left", padx=8)
 
         self.status_var = tk.StringVar(value="대기 중")
-        ttk.Label(frm, textvariable=self.status_var,
-                  foreground="blue").grid(row=5, column=0, columnspan=5,
-                                          sticky="w", padx=4)
+        ttk.Label(frm, textvariable=self.status_var, foreground="blue").grid(
+            row=5, column=0, columnspan=5, sticky="w", padx=4)
+
         for i in range(5):
             frm.columnconfigure(i, weight=1)
 
@@ -473,49 +469,53 @@ class App:
         ttk.Label(frm, text=f"fabDif : {FABDIF_REGEX.pattern}",
                   font=("Consolas", 9)).pack(anchor="w", padx=6)
 
-    # ── 결과 트리 (최초 1회 생성) ──────────────────────────
+    # ── 결과 트리 ──────────────────────────────────────────
     def _build_trees(self):
-        columns = (["file", "author", "type",
-                    "fabuse_value", "fabuse_yn",
-                    "catg_cd", "dif_cd"] + ALL_FACTORIES)
-        headers = {
-            "file":         "파일명",
+        self._columns = (["file", "author", "type",
+                           "fabuse_value", "fabuse_yn",
+                           "catg_cd", "dif_cd"] + ALL_FACTORIES)
+        self._headers = {
+            "file":         "파일명 (헤더클릭=복사)",
             "author":       "Merge개발자",
             "type":         "구분",
-            "fabuse_value": "FabUseVal",
+            "fabuse_value": "FabUseVal (헤더클릭=복사)",
             "fabuse_yn":    "FabUseYn",
-            "catg_cd":      "CatgCd",
-            "dif_cd":       "DifCd",
+            "catg_cd":      "CatgCd (헤더클릭=복사)",
+            "dif_cd":       "DifCd (헤더클릭=복사)",
         }
         for f in ALL_FACTORIES:
-            headers[f] = f
+            self._headers[f] = f
 
-        new_frame = ttk.LabelFrame(self.root, text="🔴 신규 등록 필요 (X 포함)")
+        new_frame = ttk.LabelFrame(self.root, text="🔴 신규 등록 필요 (X 포함)  ※ 컬럼 헤더 클릭 시 해당 컬럼 전체 값 복사")
         new_frame.pack(fill="both", expand=True, padx=8, pady=3)
-        self.tree_new = self._make_tree(new_frame, columns, headers)
-        self.tree_new.tag_configure("has_x",  background="#ffd6d6")
-        self.tree_new.tag_configure("child",  background="#fff0f0", foreground="#888888")
+        self.tree_new = self._make_tree(new_frame)
+        self.tree_new.tag_configure("has_x", background="#ffd6d6")
+        self.tree_new.tag_configure("child", background="#fff0f0", foreground="#999999")
 
-        exist_frame = ttk.LabelFrame(self.root, text="🟢 기등록 (DB 값 존재)")
+        exist_frame = ttk.LabelFrame(self.root, text="🟢 기등록 (DB 값 존재)  ※ 컬럼 헤더 클릭 시 해당 컬럼 전체 값 복사")
         exist_frame.pack(fill="both", expand=True, padx=8, pady=3)
-        self.tree_exist = self._make_tree(exist_frame, columns, headers)
-        self.tree_exist.tag_configure("child", background="#f5f5f5", foreground="#888888")
+        self.tree_exist = self._make_tree(exist_frame)
+        self.tree_exist.tag_configure("child", background="#f5f5f5", foreground="#999999")
 
-    def _make_tree(self, parent, columns, headers):
-        frm = ttk.Frame(parent)
+    def _make_tree(self, parent):
+        columns = self._columns
+        headers = self._headers
+
+        frm  = ttk.Frame(parent)
         frm.pack(fill="both", expand=True)
 
         tree = ttk.Treeview(frm, columns=columns,
-                             show="tree headings",   # 계층 구조 표시
+                             show="tree headings",
                              height=7,
                              selectmode="extended")
 
-        # #0 컬럼: 확장 아이콘 전용 (좁게)
         tree.column("#0", width=24, minwidth=24, stretch=False)
         tree.heading("#0", text="")
 
         for col in columns:
-            tree.heading(col, text=headers[col])
+            # 헤더 클릭 → 해당 컬럼 전체 값 복사
+            tree.heading(col, text=headers[col],
+                         command=lambda c=col, t=tree: self._copy_column(c, t))
             if col in ALL_FACTORIES:
                 w = COL_WIDTH["factory"]
             else:
@@ -532,40 +532,41 @@ class App:
         frm.rowconfigure(0, weight=1)
         frm.columnconfigure(0, weight=1)
 
-        # 셀 클릭 → 셀 값 저장
-        def on_click(event, t=tree):
-            region = t.identify("region", event.x, event.y)
-            if region == "cell":
-                col = t.identify_column(event.x)
-                row = t.identify_row(event.y)
-                if row and col:
-                    col_idx = int(col.replace("#", "")) - 1
-                    values  = t.item(row, "values")
-                    if values and 0 <= col_idx < len(values):
-                        self._last_cell_value = str(values[col_idx])
-                    else:
-                        self._last_cell_value = None
-            else:
-                self._last_cell_value = None
-
-        # Ctrl+C: 셀 클릭 후면 셀 값만, 아니면 선택 행 전체
-        def on_copy(event, t=tree):
-            if self._last_cell_value is not None:
-                self.root.clipboard_clear()
-                self.root.clipboard_append(self._last_cell_value)
-                self._last_cell_value = None
-            else:
-                self._copy_selected(t)
-
-        tree.bind("<Button-1>", on_click)
-        tree.bind("<Control-c>", on_copy)
-
-        menu = tk.Menu(tree, tearoff=0)
-        menu.add_command(label="셀 값 복사",      command=lambda: on_copy(None))
-        menu.add_command(label="선택 행 복사",     command=lambda: self._copy_selected(tree))
-        tree.bind("<Button-3>", lambda e: menu.post(e.x_root, e.y_root))
+        # 행 선택 후 Ctrl+C → 선택 행 복사
+        tree.bind("<Control-c>", lambda e, t=tree: self._copy_selected(t))
 
         return tree
+
+    # ── 컬럼 전체 복사 ─────────────────────────────────────
+    def _copy_column(self, col, tree):
+        col_idx = self._columns.index(col)
+        values  = []
+        for item in tree.get_children():
+            vals = tree.item(item, "values")
+            if vals and col_idx < len(vals) and vals[col_idx]:
+                values.append(str(vals[col_idx]))
+            for child in tree.get_children(item):
+                vals = tree.item(child, "values")
+                if vals and col_idx < len(vals) and vals[col_idx]:
+                    values.append(str(vals[col_idx]))
+        if values:
+            self.root.clipboard_clear()
+            self.root.clipboard_append("\n".join(values))
+            col_name = self._headers.get(col, col).replace(" (헤더클릭=복사)", "")
+            self.status_var.set(f"[{col_name}] {len(values)}개 복사됨")
+        else:
+            self.status_var.set("복사할 값이 없습니다.")
+
+    # ── 선택 행 복사 ───────────────────────────────────────
+    def _copy_selected(self, tree):
+        selected = tree.selection()
+        if not selected:
+            return
+        lines = ["\t".join(str(v) for v in tree.item(i, "values"))
+                 for i in selected]
+        self.root.clipboard_clear()
+        self.root.clipboard_append("\n".join(lines))
+        self.status_var.set(f"{len(lines)}행 복사됨")
 
     # ── 팩토리 컬럼 숨김/표시 ──────────────────────────────
     def _on_factory_toggle(self):
@@ -586,7 +587,7 @@ class App:
         ttk.Button(frm, text="엑셀 내보내기",
                    command=self._export_excel).pack(side="right", padx=4)
 
-    # ── 이벤트 ─────────────────────────────────────────────
+    # ── 이벤트 핸들러 ──────────────────────────────────────
     def _browse_repo(self):
         path = filedialog.askdirectory()
         if path:
@@ -594,17 +595,8 @@ class App:
 
     def _stop_clicked(self):
         self._stop_event.set()
-        self.status_var.set("중지 요청됨...")
+        self.status_var.set("중지 요청됨... (현재 작업 완료 후 중지)")
         self.stop_btn.config(state="disabled")
-
-    def _copy_selected(self, tree):
-        selected = tree.selection()
-        if not selected:
-            return
-        lines = ["\t".join(str(v) for v in tree.item(i, "values"))
-                 for i in selected]
-        self.root.clipboard_clear()
-        self.root.clipboard_append("\n".join(lines))
 
     def _run_clicked(self):
         repo_path   = self.repo_path_var.get().strip()
@@ -668,20 +660,20 @@ class App:
             self.root.after(0, lambda: self.run_btn.config(state="normal"))
             self.root.after(0, lambda: self.stop_btn.config(state="disabled"))
 
-    # ── 행 추가 (부모 + 자식 구조) ─────────────────────────
+    # ── 행 추가 ────────────────────────────────────────────
     def _add_row(self, row):
         active = row["active_factories"]
-        files  = row["files"]   # [(filepath, author), ...]
+        files  = row["files"]
 
         if row["call_type"] == "fabUse":
-            has_x      = row["fabuse_yn"] == "X"
-            fac_values = [""] * len(ALL_FACTORIES)
-            def make_values(filepath, author):
-                return [filepath, author, "fabUse",
-                        row["fabuse_value"], row["fabuse_yn"],
-                        "", ""] + fac_values
+            has_x     = row["fabuse_yn"] == "X"
+            fac_vals  = [""] * len(ALL_FACTORIES)
+            def make_values(fp, auth):
+                return ([fp, auth, "fabUse",
+                         row["fabuse_value"], row["fabuse_yn"], "", ""]
+                        + fac_vals)
         else:
-            fac_values = [
+            fac_vals = [
                 row["factory_results"].get(f, "X") if f in active else ""
                 for f in ALL_FACTORIES
             ]
@@ -689,30 +681,26 @@ class App:
                 row["factory_results"].get(f, "X") == "X"
                 for f in active
             )
-            def make_values(filepath, author):
-                return [filepath, author, "fabDif",
-                        "", "", row["catg_cd"], row["dif_cd"]] + fac_values
+            def make_values(fp, auth):
+                return ([fp, auth, "fabDif",
+                         "", "", row["catg_cd"], row["dif_cd"]]
+                        + fac_vals)
 
-        tree = self.tree_new if has_x else self.tree_exist
-        tag  = ("has_x",) if has_x else ()
+        tree  = self.tree_new if has_x else self.tree_exist
+        tag   = ("has_x",) if has_x else ()
 
         first_file, first_author = files[0]
-        extra = len(files) - 1
+        extra        = len(files) - 1
+        display_file = f"{first_file}  (+{extra})" if extra > 0 else first_file
 
-        # 파일이 여러 개면 "(+N)" 표시
-        display_file = (f"{first_file}  (+{extra})" if extra > 0 else first_file)
+        parent_id = tree.insert("", "end",
+                                values=make_values(display_file, first_author),
+                                tags=tag,
+                                open=False)
 
-        parent_values      = make_values(display_file, first_author)
-        parent_id          = tree.insert("", "end",
-                                         values=parent_values,
-                                         tags=tag,
-                                         open=False)
-
-        # 자식 행: 추가 파일들
         for fp, auth in files[1:]:
-            child_values = make_values(fp, auth)
             tree.insert(parent_id, "end",
-                        values=child_values,
+                        values=make_values(fp, auth),
                         tags=("child",))
 
         if has_x:
@@ -723,35 +711,6 @@ class App:
         self.status_var.set(
             f"조회 중...  신규 {self._new_count}건  /  기등록 {self._exist_count}건"
         )
-
-
-# 헤더 클릭 → 해당 컬럼 전체 값 복사
-def on_header_click(col, t=tree):
-    values = []
-    for item in t.get_children():
-        vals = t.item(item, "values")
-        col_idx = columns.index(col)
-        if vals and col_idx < len(vals):
-            v = str(vals[col_idx])
-            if v:  # 빈 값 제외
-                values.append(v)
-        # 자식 행도 포함
-        for child in t.get_children(item):
-            vals = t.item(child, "values")
-            if vals and col_idx < len(vals):
-                v = str(vals[col_idx])
-                if v:
-                    values.append(v)
-
-    if values:
-        result = "\n".join(values)
-        self.root.clipboard_clear()
-        self.root.clipboard_append(result)
-        self.status_var.set(f"[{headers[col]}] {len(values)}개 복사됨")
-
-for col in columns:
-    tree.heading(col, text=headers[col],
-                 command=lambda c=col: on_header_click(c, tree))
 
     def _on_analysis_done(self):
         stopped = self._stop_event.is_set()
@@ -774,10 +733,9 @@ for col in columns:
         if not path:
             return
 
-        active  = self.active_factories
-        header  = (["구분", "파일명", "Merge개발자", "호출타입",
-                    "FabUseVal", "FabUseYn", "CatgCd", "DifCd"] + active)
-
+        active      = self.active_factories
+        header      = (["구분", "파일명", "Merge개발자", "호출타입",
+                         "FabUseVal", "FabUseYn", "CatgCd", "DifCd"] + active)
         fill_red    = PatternFill("solid", fgColor="FFD6D6")
         fill_header = PatternFill("solid", fgColor="4472C4")
         fill_child  = PatternFill("solid", fgColor="F5F5F5")
@@ -798,10 +756,9 @@ for col in columns:
             ("신규등록필요", [r for r in self.rows_data if     _is_new(r)]),
             ("기등록",       [r for r in self.rows_data if not _is_new(r)]),
         ]:
-            ws  = wb.create_sheet(sheet_name)
-            ri  = 1
+            ws = wb.create_sheet(sheet_name)
+            ri = 1
 
-            # 헤더
             for ci, h in enumerate(header, 1):
                 cell = ws.cell(row=ri, column=ci, value=h)
                 cell.fill      = fill_header
@@ -815,23 +772,21 @@ for col in columns:
 
                 if r["call_type"] == "fabUse":
                     fvals = [""] * len(active)
-                    def make_row(fp, auth, lbl=label):
-                        return [lbl, fp, auth, "fabUse",
-                                r["fabuse_value"], r["fabuse_yn"],
-                                "", ""] + fvals
+                    def make_row(fp, auth):
+                        return ([label, fp, auth, "fabUse",
+                                 r["fabuse_value"], r["fabuse_yn"], "", ""]
+                                + fvals)
                 else:
                     fvals = [r["factory_results"].get(f, "X") for f in active]
-                    def make_row(fp, auth, lbl=label):
-                        return [lbl, fp, auth, "fabDif",
-                                "", "", r["catg_cd"], r["dif_cd"]] + fvals
+                    def make_row(fp, auth):
+                        return ([label, fp, auth, "fabDif",
+                                 "", "", r["catg_cd"], r["dif_cd"]]
+                                + fvals)
 
-                # 부모 행
-                files = r["files"]
-                for file_idx, (fp, auth) in enumerate(files):
-                    row_data = make_row(fp, auth)
+                for file_idx, (fp, auth) in enumerate(r["files"]):
                     is_child = file_idx > 0
-                    for ci, val in enumerate(row_data, 1):
-                        cell = ws.cell(row=ri, column=ci, value=val)
+                    for ci, val in enumerate(make_row(fp, auth), 1):
+                        cell           = ws.cell(row=ri, column=ci, value=val)
                         cell.alignment = center
                         if is_child:
                             cell.fill = fill_child
