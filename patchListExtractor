@@ -143,10 +143,18 @@ def get_connection():
 # =========================================================
 # 5. Git 관련 함수
 # =========================================================
+def _resolve_diff_range(from_commit, to_commit):
+    """from == to 면 단일 커밋 조회로 자동 전환"""
+    if from_commit == to_commit:
+        return f"{to_commit}~1..{to_commit}"
+    return f"{from_commit}..{to_commit}"
+
+
 def get_changed_files(repo_path, branch, from_commit, to_commit):
     """from~to 사이 변경된 파일 목록 (대상 확장자만)"""
     repo = git.Repo(repo_path)
-    diff_index = repo.git.diff("--name-only", f"{from_commit}..{to_commit}")
+    diff_range = _resolve_diff_range(from_commit, to_commit)
+    diff_index = repo.git.diff("--name-only", diff_range)
     files = [f for f in diff_index.splitlines() if f.strip()]
     files = [f for f in files if f.lower().endswith(TARGET_EXTENSIONS)]
     return repo, files
@@ -165,10 +173,11 @@ def get_changed_content(repo, from_commit, to_commit, filepath):
     B안: diff 에서 추가(+)된 라인 + 앞뒤 컨텍스트만 반환.
     삭제(-)된 라인은 제외.
     """
+    diff_range = _resolve_diff_range(from_commit, to_commit)
     try:
         diff_text = repo.git.diff(
             f"-U{DIFF_CONTEXT_LINES}",
-            f"{from_commit}..{to_commit}",
+            diff_range,
             "--",
             filepath,
         )
@@ -193,9 +202,10 @@ def get_changed_content(repo, from_commit, to_commit, filepath):
 
 def get_last_author(repo, from_commit, to_commit, filepath):
     """from~to 범위에서 해당 파일을 마지막으로 수정한 커밋의 author"""
+    diff_range = _resolve_diff_range(from_commit, to_commit)
     try:
         log = repo.git.log(
-            f"{from_commit}..{to_commit}",
+            diff_range,
             "--format=%an",
             "--",
             filepath,
